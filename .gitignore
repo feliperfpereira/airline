@@ -10,3 +10,6 @@
 /airline-data/.bsp
 *.sql
 node_modules
+airline-web/conf/application.conf
+airline-data/src/main/resources/application.conf
+.claude/settings.local.json

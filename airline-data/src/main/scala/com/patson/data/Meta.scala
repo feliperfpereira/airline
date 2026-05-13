@@ -1930,6 +1930,7 @@ object Meta {
       "week INTEGER, " +
       "period INTEGER, " +
       "total_pax INTEGER, " +
+      "total_tickets_sold INTEGER NOT NULL DEFAULT 0, " +
       "missed_pax INTEGER, " +
       "load_factor DOUBLE, " +
       "PRIMARY KEY (week, period)" +
