@@ -106,11 +106,7 @@ abstract class FlightPreference(homeAirport : Airport) {
     val standardPrice = link.standardPrice(preferredLinkClass, paxType)
     val classAdjustedPrice = priceAdjustedByLinkClassDiff(link, linkClass, paxType)
     val deltaFromStandardPrice = classAdjustedPrice - standardPrice
-    val priceSensitivityModifier = if (deltaFromStandardPrice < 0 && (getPreferenceType == FlightPreferenceType.FREQUENT || getPreferenceType == FlightPreferenceType.BRAND || getPreferenceType == FlightPreferenceType.LAST_MINUTE)) {
-        0.7 * priceSensitivity * classAdjustedPrice.toDouble / standardPrice //low prices impact these preferences less
-      } else {
-        priceSensitivity
-      }
+    val priceSensitivityModifier = priceSensitivity
     1.0 + deltaFromStandardPrice * priceSensitivityModifier / standardPrice
   }
 
@@ -198,10 +194,10 @@ abstract class FlightPreference(homeAirport : Airport) {
 
   val frequencyAdjustRatio = (link : Transport, linkClass : LinkClass, paxType: PassengerType.Value) => {
     val frequencySensitivity = paxType match {
-      case PassengerType.TRAVELER => 0.2
-      case PassengerType.BUSINESS => 0.6
-      case PassengerType.ELITE => 0.3
-      case _ => 0.15
+      case PassengerType.TRAVELER => 0.15
+      case PassengerType.BUSINESS => 0.4
+      case PassengerType.ELITE => 0.25
+      case _ => 0.12
     }
     //shorter duration flights care much more about flight frequency
     val distanceModifier = {

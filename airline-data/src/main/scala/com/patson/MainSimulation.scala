@@ -56,6 +56,10 @@ object MainSimulation extends App {
     EventSimulation.simulate(cycle)
     println("Event simulation done")
 
+    println("Bot pricing simulation")
+    BotPricingSimulation.simulate(cycle)
+    println("Bot pricing simulation done")
+
     println("Link simulation starting")
     val (flightLinkResult, loungeResult, linkRidershipDetails, paxStatsByAirlineId) = LinkSimulation.linkSimulation(cycle)
     println("Link simulation done")
