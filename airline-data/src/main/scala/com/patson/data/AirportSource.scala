@@ -811,8 +811,13 @@ object AirportSource {
       while (resultSet.next()) {
         val airportId = resultSet.getInt("airport")
         val airlineId = resultSet.getInt("airline")
-        val loyalist = Loyalist(AirportCache.getAirport(airportId).get, AirlineCache.getAirline(airlineId).get, resultSet.getInt("loyalist"))
-        result += AirportChampionInfo(loyalist, ranking = resultSet.getInt("ranking"), reputationBoost = resultSet.getDouble("reputation_boost"))
+        for {
+          airport <- AirportCache.getAirport(airportId)
+          airline <- AirlineCache.getAirline(airlineId)
+        } {
+          val loyalist = Loyalist(airport, airline, resultSet.getInt("loyalist"))
+          result += AirportChampionInfo(loyalist, ranking = resultSet.getInt("ranking"), reputationBoost = resultSet.getDouble("reputation_boost"))
+        }
       }
       resultSet.close()
       preparedStatement.close()

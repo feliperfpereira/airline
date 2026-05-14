@@ -13,10 +13,11 @@ object LoyalistSource {
   private def whereClause(criteria: List[(String, Any)]): String =
     if (criteria.nonEmpty) " WHERE " + criteria.map(_._1 + " = ?").mkString(" AND ") else ""
 
-  private def readLoyalistHistory(rs: ResultSet): LoyalistHistory = {
-    val airport = AirportCache.getAirport(rs.getInt("airport")).get
-    val airline = AirlineCache.getAirline(rs.getInt("airline")).get
-    LoyalistHistory(Loyalist(airport, airline, rs.getInt("amount")), rs.getInt("cycle"))
+  private def readLoyalistHistory(rs: ResultSet): Option[LoyalistHistory] = {
+    for {
+      airport <- AirportCache.getAirport(rs.getInt("airport"))
+      airline <- AirlineCache.getAirline(rs.getInt("airline"))
+    } yield LoyalistHistory(Loyalist(airport, airline, rs.getInt("amount")), rs.getInt("cycle"))
   }
 
   def updateLoyalists(loyalistEntries: List[Loyalist]): Unit =
@@ -56,9 +57,10 @@ object LoyalistSource {
       val rs = use(stmt.executeQuery())
       val entries = ListBuffer[Loyalist]()
       while (rs.next()) {
-        val airport = AirportCache.getAirport(rs.getInt("airport")).get
-        val airline = AirlineCache.getAirline(rs.getInt("airline")).get
-        entries += Loyalist(airport, airline, rs.getInt("amount"))
+        for {
+          airport <- AirportCache.getAirport(rs.getInt("airport"))
+          airline <- AirlineCache.getAirline(rs.getInt("airline"))
+        } entries += Loyalist(airport, airline, rs.getInt("amount"))
       }
       entries.toList
     }.get
@@ -133,7 +135,7 @@ object LoyalistSource {
       stmt.setInt(1, airportId)
       val rs = use(stmt.executeQuery())
       val entries = ListBuffer[LoyalistHistory]()
-      while (rs.next()) entries += readLoyalistHistory(rs)
+      while (rs.next()) readLoyalistHistory(rs).foreach(entries += _)
       entries.toList.groupBy(_.cycle)
     }.get
 
@@ -146,7 +148,7 @@ object LoyalistSource {
       criteria.zipWithIndex.foreach { case ((_, value), i) => stmt.setObject(i + 1, value) }
       val rs = use(stmt.executeQuery())
       val entries = ListBuffer[LoyalistHistory]()
-      while (rs.next()) entries += readLoyalistHistory(rs)
+      while (rs.next()) readLoyalistHistory(rs).foreach(entries += _)
       entries.toList
     }.get
 

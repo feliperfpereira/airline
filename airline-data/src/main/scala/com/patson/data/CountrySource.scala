@@ -591,24 +591,32 @@ object CountrySource {
   
   def saveMarketShares(marketShares : List[CountryMarketShare]) = {
      val connection = Meta.getConnection()
-     try {  
+     try {
        connection.setAutoCommit(false)
-       //purge existing ones
-       val truncateStatement = connection.prepareStatement("TRUNCATE TABLE "+ COUNTRY_MARKET_SHARE_TABLE);
-       truncateStatement.executeUpdate()       
-       
+       val truncateStatement = connection.prepareStatement("TRUNCATE TABLE "+ COUNTRY_MARKET_SHARE_TABLE)
+       truncateStatement.executeUpdate()
+
+       val validAirlineIds : Set[Int] = {
+         val stmt = connection.prepareStatement("SELECT id FROM " + AIRLINE_TABLE)
+         val rs = stmt.executeQuery()
+         val ids = scala.collection.mutable.Set[Int]()
+         while (rs.next()) ids += rs.getInt("id")
+         rs.close(); stmt.close()
+         ids.toSet
+       }
+
        val replaceStatement = connection.prepareStatement("REPLACE INTO " + COUNTRY_MARKET_SHARE_TABLE + "(country, airline, passenger_count) VALUES (?,?,?)")
        marketShares.foreach { marketShare =>
-           replaceStatement.setString(1, marketShare.countryCode)
-           marketShare.airlineShares.foreach { 
-             case((airline, passenger_count)) =>
-               replaceStatement.setInt(2, airline)
-               replaceStatement.setDouble(3, passenger_count)
-               replaceStatement.addBatch()
-           }
-           
+         replaceStatement.setString(1, marketShare.countryCode)
+         marketShare.airlineShares.foreach {
+           case (airline, passenger_count) if validAirlineIds.contains(airline) =>
+             replaceStatement.setInt(2, airline)
+             replaceStatement.setDouble(3, passenger_count)
+             replaceStatement.addBatch()
+           case _ => // skip stale airline IDs
+         }
        }
-       
+
        replaceStatement.executeBatch()
        connection.commit()
        truncateStatement.close()

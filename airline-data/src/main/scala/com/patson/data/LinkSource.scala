@@ -410,7 +410,7 @@ object LinkSource {
           link.id = generatedId
 
           if (link.isInstanceOf[Link]) {
-            ChangeHistorySource.saveLinkChange(buildChangeHistory(None, Some(link.asInstanceOf[Link])))
+            buildChangeHistory(None, Some(link.asInstanceOf[Link])).foreach(ChangeHistorySource.saveLinkChange)
           }
 
           return Some(link)
@@ -470,7 +470,7 @@ object LinkSource {
             val generatedId = generatedKeys.getInt(1)
             link.id = generatedId
             if (link.isInstanceOf[Link]) {
-              changeHistoryEntries.append(buildChangeHistory(None, Some(link.asInstanceOf[Link])))
+              buildChangeHistory(None, Some(link.asInstanceOf[Link])).foreach(changeHistoryEntries.append)
             }
           }
         }
@@ -521,7 +521,7 @@ object LinkSource {
 
         if (link.isInstanceOf[Link]) {
           if (hasChange(existingLink.get, link)) {
-            ChangeHistorySource.saveLinkChange(buildChangeHistory(existingLink.map(_.asInstanceOf[Link]), Some(link.asInstanceOf[Link])))
+            buildChangeHistory(existingLink.map(_.asInstanceOf[Link]), Some(link.asInstanceOf[Link])).foreach(ChangeHistorySource.saveLinkChange)
           }
         }
 
@@ -565,7 +565,7 @@ object LinkSource {
           if (link.transportType == TransportType.FLIGHT) {
             val flightLink = link.asInstanceOf[Link]
             if (hasChange(existingLinks.get(link.id).get.asInstanceOf[Link], flightLink)) {
-              changeEntries.append(buildChangeHistory(existingLinks.get(flightLink.id).map(_.asInstanceOf[Link]), Some(flightLink)))
+              buildChangeHistory(existingLinks.get(flightLink.id).map(_.asInstanceOf[Link]), Some(flightLink)).foreach(changeEntries.append)
             }
           }
         }
@@ -690,7 +690,7 @@ object LinkSource {
       purgingLinks.foreach {
         case (linkId, link) =>
           if (link.isInstanceOf[Link]) {
-            changeEntries.append(buildChangeHistory(Some(link.asInstanceOf[Link]), None))
+            buildChangeHistory(Some(link.asInstanceOf[Link]), None).foreach(changeEntries.append)
           }
       }
 
@@ -702,7 +702,7 @@ object LinkSource {
     }
   }
 
-  def buildChangeHistory(existingLinkOption : Option[Link], newLinkOption : Option[Link]) : LinkChange = {
+  def buildChangeHistory(existingLinkOption : Option[Link], newLinkOption : Option[Link]) : Option[LinkChange] = {
     val existingPrice = existingLinkOption match { //for new link, the price is not consider as delta
       case Some(existingLink) => existingLink.price
       case None => newLinkOption.map(_.price).getOrElse(LinkClassValues.getInstance())
@@ -722,14 +722,13 @@ object LinkSource {
       case None => LinkClassValues.getInstance()
     }
 
-
     val link = existingLinkOption.getOrElse(newLinkOption.get)
 
-    val fromAirport = AirportCache.getAirport(link.from.id).get //in some case it could be just ID, need to reload
-    val toAirport =  AirportCache.getAirport(link.to.id).get //in some case it could be just ID, need to reload
-    val airline = AirlineCache.getAirline(link.airline.id, true).get
-
-    val entry = LinkChange(
+    for {
+      fromAirport <- AirportCache.getAirport(link.from.id)
+      toAirport   <- AirportCache.getAirport(link.to.id)
+      airline     <- AirlineCache.getAirline(link.airline.id, true)
+    } yield LinkChange(
       linkId = link.id,
       price = newPrice,
       priceDelta = newPrice - existingPrice,
@@ -745,9 +744,7 @@ object LinkSource {
       flightNumber = link.flightNumber,
       airplaneModel = link.getAssignedModel().getOrElse(Model.fromId(0)),
       rawQuality = link.rawQuality,
-      cycle =  CycleSource.loadCycle())
-
-    entry
+      cycle = CycleSource.loadCycle())
   }
   
   def saveLinkConsumptions(linkConsumptions: List[LinkConsumptionDetails]) = {

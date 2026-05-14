@@ -22,6 +22,7 @@ import java.util.concurrent.ThreadLocalRandom
 import scala.collection.mutable
 import scala.concurrent.Await
 import scala.concurrent.duration.Duration
+import scala.jdk.CollectionConverters._
 
 
 object AirlineGenerator extends App {
@@ -49,14 +50,72 @@ object AirlineGenerator extends App {
     generateArabiaAirline()
     generateCaribbeanAirline()
     generatePacificAirline()
+    generateCustomBots()
     resizeBases()
 
     println("DONE Creating airlines")
     Await.result(actorSystem.terminate(), Duration.Inf)
   }
 
+  def generateCustomBots(): Unit = {
+    val botsConfig = ConfigFactory.load("bots")
+    if (!botsConfig.hasPath("custom-bots")) {
+      println("bots.conf: no custom-bots defined, skipping")
+      return
+    }
+
+    val botConfigs = botsConfig.getConfigList("custom-bots").asScala.toList
+    println(s"bots.conf: loading ${botConfigs.size} custom bot(s)")
+
+    botConfigs.foreach { bc =>
+      val name     = bc.getString("name")
+      val username = bc.getString("username")
+      val hqIata   = bc.getString("hq")
+
+      airports.find(_.iata == hqIata) match {
+        case None =>
+          println(s"[bots.conf] WARNING: HQ '$hqIata' not found, skipping '$name'")
+        case Some(hqAirport) =>
+          val baseIatas   = bc.getStringList("bases").asScala.toList
+          val models      = bc.getStringList("models").asScala.toList
+          val maxDistance = bc.getInt("maxDistance")
+          val quality     = bc.getInt("quality")
+          val balance     = if (bc.hasPath("balance")) bc.getLong("balance") else 1000000000L
+          val reputation  = if (bc.hasPath("reputation")) bc.getInt("reputation") else 80
+
+          val bases = baseIatas.flatMap { iata =>
+            val found = airports.find(_.iata == iata)
+            if (found.isEmpty) println(s"[bots.conf] WARNING: base '$iata' not found for '$name'")
+            found
+          }
+
+          val toAirportsCfg = bc.getConfig("toAirports")
+          val toAirports =
+            if (toAirportsCfg.hasPath("countries")) {
+              val codes = toAirportsCfg.getStringList("countries").asScala.toSet
+              airports.filter(a => codes.contains(a.countryCode))
+            } else if (toAirportsCfg.hasPath("zones")) {
+              val zones = toAirportsCfg.getStringList("zones").asScala.toList
+              airports.filter(a => zones.exists(z => a.zone.contains(z)))
+            } else if (toAirportsCfg.hasPath("airports")) {
+              val iatas = toAirportsCfg.getStringList("airports").asScala.toSet
+              airports.filter(a => iatas.contains(a.iata))
+            } else {
+              airports
+            }
+
+          generateAirline(name, username, hqAirport, bases, toAirports, models, maxDistance, quality, balance, reputation = reputation)
+      }
+    }
+  }
+
   def deleteAirlines() : Unit = {
     println("Deleting airlines...")
+    val botAirlines = AirlineSource.loadAirlinesByCriteria(List(("airline_type", NonPlayerAirline.id)))
+    botAirlines.foreach { airline =>
+      LinkSource.deleteLinksByAirlineId(airline.id)
+      LoyalistSource.deleteLoyalistsByAirline(airline.id)
+    }
     UserSource.deleteGeneratedUsers()
     UserCache.invalidateAll()
     AirlineCache.invalidateAll()
