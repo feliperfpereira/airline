@@ -14,15 +14,13 @@ import scala.concurrent.duration.Duration
 
 object MainSimulation extends App {
   val CYCLE_DURATION : Int = 60 * 29
-  val SCHEDULE_BUFFER_SECS : Int = 30
-  val SCHEDULE_OVERHEAD_FACTOR : Double = 1.1
   var currentWeek: Int = 0
 
   mainFlow
 
   def mainFlow() = {
-    val actor = actorSystem.actorOf(Props[MainSimulationActor])
-    Await.result(actorSystem.whenTerminated, Duration.Inf)
+    val actor = SimulationEventStream.system.actorOf(Props[MainSimulationActor], "mainSimulationActor")
+    Await.result(SimulationEventStream.system.whenTerminated, Duration.Inf)
   }
 
   def initializeCaches() = {
@@ -116,67 +114,41 @@ object MainSimulation extends App {
   // Actor Messages
   case object ExecuteProcessing
   case object BroadcastAndAdvance
-  case object ScheduleNext
+  case object AdvanceOnce
+  case class SetAutoAdvance(enabled: Boolean, delayMs: Long)
 
-  /**
-    * The simulation can be seen like this:
-    * On week(cycle) n. It starts the long simulation (pax simulation) at the "END of the week"
-    * when it finishes computing the pax of the past week. It sets the current week to next week (which indicates a beginning of week n + 1)
-    * It then runs some postCycle task (these tasks should be short and can be regarded as things to do at the Beginning of a week)
-    *
-    */
   class MainSimulationActor extends Actor {
-    val CYCLE_INTERVAL_MS = CYCLE_DURATION * 1000L
-    val DB_REST_BUFFER_MS = SCHEDULE_BUFFER_SECS * 1000L
+    val POST_SIM_REST_MS = 1000L  // brief rest between sim completion and broadcast
 
     var currentWeek = CycleSource.loadCycle()
-    var lastExecutionMs: Long = 0L
-    var targetDeadline: Long = 0L // In-memory dynamic deadline
-
-    override def preStart(): Unit = {
-      // First run executes immediately to update users ASAP
-      context.system.scheduler.scheduleOnce(Duration.Zero, self, ExecuteProcessing)
-    }
+    var autoAdvance: Boolean = false
+    var autoAdvanceDelayMs: Long = 1000L
+    var pendingAdvance: Boolean = false
 
     def receive = {
-      case ScheduleNext =>
-        status = SimulationStatus.WAITING_CYCLE_START
-        val estimatedExecution = (lastExecutionMs * SCHEDULE_OVERHEAD_FACTOR).toLong
-        val leadTime = estimatedExecution + DB_REST_BUFFER_MS
+      case AdvanceOnce =>
+        if (status == SimulationStatus.IN_PROGRESS) {
+          pendingAdvance = true
+        } else {
+          context.system.scheduler.scheduleOnce(Duration.Zero, self, ExecuteProcessing)
+        }
 
-        val wakeUpTime = targetDeadline - leadTime
-        val delayUntilWakeUp = Math.max(0L, wakeUpTime - System.currentTimeMillis())
-
-        println(s"Next cycle will wake up in ${delayUntilWakeUp / 1000}s (estimated exec: ${estimatedExecution / 1000}s)")
-        context.system.scheduler.scheduleOnce(Duration(delayUntilWakeUp, TimeUnit.MILLISECONDS), self, ExecuteProcessing)
+      case SetAutoAdvance(enabled, delayMs) =>
+        val wasIdle = status == SimulationStatus.WAITING_CYCLE_START && !autoAdvance
+        autoAdvance = enabled
+        autoAdvanceDelayMs = delayMs
+        if (enabled && wasIdle) {
+          context.system.scheduler.scheduleOnce(Duration.Zero, self, ExecuteProcessing)
+        }
 
       case ExecuteProcessing =>
         status = SimulationStatus.IN_PROGRESS
-        val startMs = System.currentTimeMillis()
-
         try {
           startCycle(currentWeek)
-
-          // Advance the cycle before postCycle so refreshLinksPostCycle sees newly-delivered
-          // airplanes as isReady, keeping DB capacity in sync with the upcoming cycle's view.
           currentWeek += 1
           CycleSource.setCycle(currentWeek)
-
           postCycle(currentWeek)
-
-          lastExecutionMs = System.currentTimeMillis() - startMs
-
-          // Determine DB rest. If first run (targetDeadline is 0), just take the minimum buffer.
-          // Otherwise, sync to the target deadline, enforcing the minimum buffer.
-          val delayUntilBroadcast = if (targetDeadline == 0L) {
-            DB_REST_BUFFER_MS
-          } else {
-            val timeToDeadline = targetDeadline - System.currentTimeMillis()
-            Math.max(timeToDeadline, DB_REST_BUFFER_MS)
-          }
-
-          context.system.scheduler.scheduleOnce(Duration(delayUntilBroadcast, TimeUnit.MILLISECONDS), self, BroadcastAndAdvance)
-
+          context.system.scheduler.scheduleOnce(Duration(POST_SIM_REST_MS, TimeUnit.MILLISECONDS), self, BroadcastAndAdvance)
         } catch {
           case e : Exception =>
             println(s"!!!!!!! Cycle $currentWeek failed with exception: ${e.getClass.getName}: ${e.getMessage}. Retrying in 60s.")
@@ -189,9 +161,13 @@ object MainSimulation extends App {
         val endTime = System.currentTimeMillis()
         println("Publish Cycle Complete message")
         SimulationEventStream.publish(CycleCompleted(currentWeek - 1, endTime), None)
-
-        targetDeadline = System.currentTimeMillis() + CYCLE_INTERVAL_MS
-        self ! ScheduleNext
+        status = SimulationStatus.WAITING_CYCLE_START
+        if (pendingAdvance) {
+          pendingAdvance = false
+          context.system.scheduler.scheduleOnce(Duration.Zero, self, ExecuteProcessing)
+        } else if (autoAdvance) {
+          context.system.scheduler.scheduleOnce(Duration(autoAdvanceDelayMs, TimeUnit.MILLISECONDS), self, ExecuteProcessing)
+        }
     }
   }
 

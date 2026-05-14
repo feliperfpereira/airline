@@ -15,6 +15,7 @@ import com.patson.Authentication
 import com.patson.data.UserSource
 import com.patson.model._
 import play.api.mvc._
+import com.typesafe.config.ConfigFactory
 
 import scala.concurrent.Future
 import play.api.mvc.Security.AuthenticatedRequest
@@ -22,9 +23,12 @@ import com.patson.data.AirlineSource
 import com.patson.util.AirlineCache
 
 object AuthenticationObject {
-  //  object Authenticated extends AuthenticatedBuilder(req => getUserFromRequest(req), _ =>
-  //    Unauthorized.withHeaders("WWW-Authenticate" -> """Basic realm="Secured Area"""")) {
-  //  }
+  private val configFactory = ConfigFactory.load()
+  val singlePlayerEnabled: Boolean =
+    if (configFactory.hasPath("singlePlayer.enabled")) configFactory.getBoolean("singlePlayer.enabled") else false
+  val singlePlayerUsername: String =
+    if (configFactory.hasPath("singlePlayer.username")) configFactory.getString("singlePlayer.username") else "SinglePlayer"
+
   val defaultBodyParser = new BodyParsers.Default
 
   object Authenticated extends AuthenticatedBuilder(req => getUserFromRequest(req), defaultBodyParser, unauthorizedHandler)
@@ -40,6 +44,9 @@ object AuthenticationObject {
 
 
   def getUserFromRequest(request : RequestHeader) : Option[User] = {
+    if (singlePlayerEnabled) {
+      return UserSource.loadUserByUserName(singlePlayerUsername)
+    }
     if (!request.session.isEmpty && request.session.get("userToken").isDefined) {
       request.session.get("userToken").foreach{ userToken =>
         SessionUtil.getUserId(userToken) match {

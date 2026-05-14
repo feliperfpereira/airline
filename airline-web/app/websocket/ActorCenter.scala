@@ -210,6 +210,8 @@ object ActorCenter {
   def getLocalSubscriberName(subscriberId: String): String = {
     "local-subscriber-" + subscriberId
   }
+
+  def sendSimulationControl(msg: Any): Unit = remoteMainActor ! msg
 }
 
 case class RemoteActor(remoteActor: ActorSelection)

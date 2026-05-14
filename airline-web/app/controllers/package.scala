@@ -25,8 +25,10 @@ package object controllers {
   def currentCycle: Int = cachedCurrentCycle
 
   val CYCLE_DURATION_SECONDS: Int = MainSimulation.CYCLE_DURATION
-  /** Cache-Control header for public cycle-keyed responses: cacheable for most of the cycle, stale-while-revalidate covers the flip. */
-  val CYCLE_CACHE_CONTROL: String = s"public, max-age=${CYCLE_DURATION_SECONDS - 60}, stale-while-revalidate=120"
+  val CYCLE_CACHE_CONTROL: String = "no-store"
+
+  @volatile var simAutoAdvance: Boolean = false
+  @volatile var simAutoAdvanceDelayMs: Long = 1000L
 
   implicit object AirlineFormat extends Format[Airline] {
     def reads(json: JsValue): JsResult[Airline] = {

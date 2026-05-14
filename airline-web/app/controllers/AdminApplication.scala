@@ -2,6 +2,7 @@ package controllers
 
 import com.patson.data.{AdminSource, AirlineSource, CycleSource, IpSource, UserSource, UserUuidSource}
 import com.patson.stream.CycleCompleted
+import com.patson.MainSimulation
 import websocket.ActorCenter
 import com.patson.model.UserStatus.UserStatus
 import com.patson.model.{Airline, AirlineLedgerEntry, AirlineModifier, AirlineModifierType, BannerLoyaltyAirlineModifier, LedgerType, User, UserModifier, UserStatus}
@@ -316,6 +317,24 @@ class AdminApplication @Inject()(cc: ControllerComponents) extends AbstractContr
     } else {
       Forbidden("Not a super admin user")
     }
+  }
+
+  def advanceWeek() = Authenticated { implicit request =>
+    ActorCenter.sendSimulationControl(MainSimulation.AdvanceOnce)
+    Ok(Json.obj("ok" -> true))
+  }
+
+  def setAutoAdvance(enabled: Boolean) = Authenticated { implicit request =>
+    controllers.simAutoAdvance = enabled
+    ActorCenter.sendSimulationControl(MainSimulation.SetAutoAdvance(enabled, controllers.simAutoAdvanceDelayMs))
+    Ok(Json.obj("ok" -> true, "enabled" -> enabled))
+  }
+
+  def getSimulationState() = Authenticated { implicit request =>
+    Ok(Json.obj(
+      "autoAdvance" -> controllers.simAutoAdvance,
+      "delayMs" -> controllers.simAutoAdvanceDelayMs
+    ))
   }
 
   def sendAirlineMessage(targetAirlineId : Int) = Authenticated { implicit request =>

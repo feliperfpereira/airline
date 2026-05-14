@@ -159,9 +159,50 @@ var days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 var currentTickTimer
 var tickTimerCreator
 
+var simState = null // {autoAdvance: bool} once loaded
+
+function refreshSimulationState() {
+    $.getJSON('/admin/simulation-state', function(state) {
+        simState = state
+        var checkbox = $('#autoAdvanceCheckbox, #autoAdvanceCheckboxDesktop')
+        checkbox.prop('checked', state.autoAdvance)
+        if (state.autoAdvance) {
+            $('.nextTickEstimation').text('Auto')
+        } else {
+            $('.nextTickEstimation').text('Pausado')
+        }
+        $('#advanceWeekBtn, #advanceWeekBtnDesktop').prop('disabled', false)
+    })
+}
+
+$(document).ready(function() {
+    $('#advanceWeekBtn, #advanceWeekBtnDesktop').on('click', function() {
+        simState = simState || {}
+        simState.inProgress = true
+        $('.nextTickEstimation').text('Processando...')
+        $('#advanceWeekBtn, #advanceWeekBtnDesktop').prop('disabled', true)
+        $.post('/admin/advance-week')
+    })
+
+    $('#autoAdvanceCheckbox, #autoAdvanceCheckboxDesktop').on('change', function() {
+        var enabled = this.checked
+        $('#autoAdvanceCheckbox, #autoAdvanceCheckboxDesktop').prop('checked', enabled)
+        simState = simState || {}
+        simState.autoAdvance = enabled
+        if (enabled) {
+            $('.nextTickEstimation').text('Auto')
+        } else {
+            $('.nextTickEstimation').text('Pausado')
+        }
+        $.post('/admin/auto-advance?enabled=' + enabled)
+    })
+
+    setTimeout(refreshSimulationState, 1000)
+})
+
 function updateTime(cycle, fraction, cycleDurationEstimation) {
 	currentCycle = cycle
-	$(".currentTime").attr("data-tooltip", "Week " + cycle % 48 + " & Year " + Math.floor(cycle / 48) + " | One week lasts ~ 30min and one year is 48 weeks or 24 hours in realtime.")
+	$(".currentTime").attr("data-tooltip", "Semana " + cycle % 48 + " & Ano " + Math.floor(cycle / 48) + " | Um ano tem 48 semanas.")
 
     var initialDurationTillNextTick
 	if (cycleDurationEstimation > 0) { //update incrementPerInterval
@@ -184,7 +225,15 @@ function updateTime(cycle, fraction, cycleDurationEstimation) {
 
         $(".currentTime").text(padBefore(cycle % 48 + "." + Math.floor(cycle / 48), 2))
 
-        if (hasTickEstimation) {
+        if (simState !== null) {
+            if (simState.inProgress) {
+                $('.nextTickEstimation').text('Processando...')
+            } else if (simState.autoAdvance) {
+                $('.nextTickEstimation').text('Auto')
+            } else {
+                $('.nextTickEstimation').text('Pausado')
+            }
+        } else if (hasTickEstimation) {
           var minutesLeft = Math.round(durationTillNextTick / 1000 / 60)
           if (minutesLeft <= 0) {
               $(".nextTickEstimation").text("Very soon")

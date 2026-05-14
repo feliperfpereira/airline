@@ -94,6 +94,7 @@ function connectWebSocket(airlineId) {
         if (json.messageType == "cycleInfo") {
             updateTime(json.cycle, json.fraction, json.cycleDurationEstimation)
         } else if (json.messageType == "cycleCompleted") {
+            refreshSimulationState()
             if (selectedAirlineId) {
                 if (document.hidden) {
                     if (refreshState !== 'pending') refreshState = 'needed'

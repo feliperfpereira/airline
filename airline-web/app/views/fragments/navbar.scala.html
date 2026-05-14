@@ -1,6 +1,8 @@
 
 	<div style="display: none;" class="extendedTopBarDetails flex-row items-center gap-1">
-        <p class="tooltip-attr tooltip-attr-bottom" data-tooltip="An estimate of how long until next week."><img src='@routes.Assets.versioned("/images/icons/clock-moon-phase.png")' style="vertical-align: middle;"><span class="nextTickEstimation label" style="font-weight: bold;">Estimating...</span></p>
+        <p class="tooltip-attr tooltip-attr-bottom" data-tooltip="Controle de semana do jogo."><img src='@routes.Assets.versioned("/images/icons/clock-moon-phase.png")' style="vertical-align: middle;"><span class="nextTickEstimation label" style="font-weight: bold;">Pausado</span></p>
+        <button id="advanceWeekBtn" class="button" style="padding: 2px 8px; font-size: 0.85em;" title="Avançar uma semana">&#9654; Próxima</button>
+        <label class="tooltip-attr" data-tooltip="Avançar semanas continuamente" style="display: flex; align-items: center; gap: 4px; cursor: pointer;"><input type="checkbox" id="autoAdvanceCheckbox"> Auto</label>
         <div style="display: none; margin-right: auto;" id="logoutDivMobile">
             <span id="currentUserNameMobile" class="label"></span>
             <a id="airlineSwitcherBtnMobile">
@@ -18,8 +20,10 @@
 	</div>
   	<div id="topBar" class="menubar">
         <div class="topBarDetails">
-            <p class="currentTime label tooltip-attr tooltip-attr-bottom desktopOnly" data-tooltip="One week lasts ~ 30min and one year is 48 weeks or 24 hours in realtime. "></p>
-            <p class="tooltip-attr tooltip-attr-bottom desktopOnly" data-tooltip="An estimate of how long until next week."><img src='@routes.Assets.versioned("/images/icons/clock-moon-phase.png")' style="vertical-align: middle;"><span class="nextTickEstimation label" style="font-weight: bold;">Estimating...</span></p>
+            <p class="currentTime label tooltip-attr tooltip-attr-bottom desktopOnly" data-tooltip="Um ano tem 48 semanas. Use Próxima ou Auto para avançar o tempo."></p>
+            <p class="tooltip-attr tooltip-attr-bottom desktopOnly" data-tooltip="Controle de semana do jogo."><img src='@routes.Assets.versioned("/images/icons/clock-moon-phase.png")' style="vertical-align: middle;"><span class="nextTickEstimation label" style="font-weight: bold;">Pausado</span></p>
+            <button id="advanceWeekBtnDesktop" class="button desktopOnly" style="padding: 2px 8px; font-size: 0.85em;" title="Avançar uma semana">&#9654; Próxima</button>
+            <label class="tooltip-attr desktopOnly" data-tooltip="Avançar semanas continuamente" style="display: flex; align-items: center; gap: 4px; cursor: pointer;"><input type="checkbox" id="autoAdvanceCheckboxDesktop"> Auto</label>
             <p class="tooltip-attr tooltip-attr-bottom" data-tooltip="Cash money">$<span class="balance"></span></p>
             <p class="tooltip-attr tooltip-attr-bottom actionPoints" data-tooltip="Action Points"></p>
             <div id="notificationBell" class="clickable relative pr-4" title="Notifications">
