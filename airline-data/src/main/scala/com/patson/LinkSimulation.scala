@@ -88,37 +88,47 @@ object LinkSimulation {
 
     println("Saving generated stats to DB")
     startTime = System.currentTimeMillis()
-    LinkStatisticsSource.deleteLinkStatisticsBeforeCycle(cycle - 2) //was cycle - 5
-    LinkStatisticsSource.saveLinkStatistics(linkStatistics)
-    AirportStatisticsSource.updateAllAirportStats(updatedAirportStatistics)
+    if (SimulationConfig.persistLinkStatistics) {
+      LinkStatisticsSource.deleteLinkStatisticsBeforeCycle(cycle - 2) //was cycle - 5
+      LinkStatisticsSource.saveLinkStatistics(linkStatistics)
+    }
+    if (SimulationConfig.persistAirportStatistics) {
+      AirportStatisticsSource.updateAllAirportStats(updatedAirportStatistics)
+    }
     println(Util.outputTimeDiff(startTime, "[lsim] saveStats:"))
 
     //save country market share (now generated in the same loop)
     println("Saving country market share to DB")
-    CountrySource.saveMarketShares(countryMarketShares)
+    if (SimulationConfig.persistCountryMarketShare) {
+      CountrySource.saveMarketShares(countryMarketShares)
+    }
 
     //generate Olympics stats
-    EventSource.loadEvents().filter(_.isActive(cycle)).foreach {
-      case olympics: Olympics =>
-        println("Generating Olympics stats")
-        val olympicsConsumptions = consumptionResult.filter {
-          case ((passengerGroup, _, _), _) => passengerGroup.passengerType == PassengerType.OLYMPICS
-        }
-        val missedOlympicsPassengers = missedPassengerResult.filter {
-          case ((passengerGroup, _), _) => passengerGroup.passengerType == PassengerType.OLYMPICS
-        }
-        val olympicsCountryStats = generateOlympicsCountryStats(cycle, olympicsConsumptions, missedOlympicsPassengers)
-        EventSource.saveOlympicsCountryStats(olympics.id, olympicsCountryStats)
-        val olympicsAirlineStats = generateOlympicsAirlineStats(cycle, olympicsConsumptions)
-        EventSource.saveOlympicsAirlineStats(olympics.id, olympicsAirlineStats)
-        println("Generated olympics country stats")
-      case _ => //
+    if (SimulationConfig.persistOlympicsStats) {
+      EventSource.loadEvents().filter(_.isActive(cycle)).foreach {
+        case olympics: Olympics =>
+          println("Generating Olympics stats")
+          val olympicsConsumptions = consumptionResult.filter {
+            case ((passengerGroup, _, _), _) => passengerGroup.passengerType == PassengerType.OLYMPICS
+          }
+          val missedOlympicsPassengers = missedPassengerResult.filter {
+            case ((passengerGroup, _), _) => passengerGroup.passengerType == PassengerType.OLYMPICS
+          }
+          val olympicsCountryStats = generateOlympicsCountryStats(cycle, olympicsConsumptions, missedOlympicsPassengers)
+          EventSource.saveOlympicsCountryStats(olympics.id, olympicsCountryStats)
+          val olympicsAirlineStats = generateOlympicsAirlineStats(cycle, olympicsConsumptions)
+          EventSource.saveOlympicsAirlineStats(olympics.id, olympicsAirlineStats)
+          println("Generated olympics country stats")
+        case _ => //
+      }
     }
 
     //save all consumptions
     startTime = System.currentTimeMillis()
     println("Saving " + consumptionResult.size +  " consumptions")
-    ConsumptionHistorySource.updateConsumptions(consumptionResult)
+    if (SimulationConfig.persistConsumptionHistory) {
+      ConsumptionHistorySource.updateConsumptions(consumptionResult)
+    }
     println(Util.outputTimeDiff(startTime, "[lsim] updateConsumptions:"))
 
     //save top 10 missed demand per origin airport
@@ -141,7 +151,9 @@ object LinkSimulation {
             MissedDemandEntry(fId, tId, paxType, prefType, linkClass, count)
         }
       }
-    MissedDemandSource.deleteAndSave(topMissed)
+    if (SimulationConfig.persistMissedDemandSnapshot) {
+      MissedDemandSource.deleteAndSave(topMissed)
+    }
     println(Util.outputTimeDiff(startTime, "[lsim] saveMissedDemand:"))
 
     println("Calculating profits by links")

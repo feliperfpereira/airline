@@ -42,6 +42,7 @@ object PassengerSimulation {
 
   def passengerConsume[T <: Transport](demand : List[(PassengerGroup, Airport, Int)], links : List[T]) : PassengerConsumptionResult = {
     val consumeStartTime = System.currentTimeMillis()
+    val verbose = SimulationConfig.verbose
     println(s"[ParallelConsume] cores=${Runtime.getRuntime.availableProcessors}")
     val consumptionResult = Collections.synchronizedList(new ArrayList[(PassengerGroup, Airport, Int, Route)]())
     val missedDemandChunks = Collections.synchronizedList(new ArrayList[(PassengerGroup, Airport, Int)]())
@@ -58,8 +59,8 @@ object PassengerSimulation {
     }
     println("Total active airports: " + activeAirportIds.size)
 
-    println(">> Transfer base specs: " + transferBaseSpecializationDiscounts.size)
-    if (transferBaseSpecializationDiscounts.size <= 50) {
+    if (verbose) println(">> Transfer base specs: " + transferBaseSpecializationDiscounts.size)
+    if (verbose && transferBaseSpecializationDiscounts.size <= 50) {
       println(transferBaseSpecializationDiscounts)
     }
 
@@ -217,10 +218,12 @@ object PassengerSimulation {
           }
 
           if (hasComputedRouteMap) {
-            if (progressChunk == 0 || counter.incrementAndGet() % progressChunk == 0) {
-              print(".")
-              if (progressCount.incrementAndGet() % 10 == 0) {
-                print(progressCount.get + "% ")
+            if (verbose) {
+              if (progressChunk == 0 || counter.incrementAndGet() % progressChunk == 0) {
+                print(".")
+                if (progressCount.incrementAndGet() % 10 == 0) {
+                  print(progressCount.get + "% ")
+                }
               }
             }
           }
@@ -235,20 +238,25 @@ object PassengerSimulation {
       }
     }
 
-    // Overbooking self-check: any negative availableSeats means sold > capacity (a bug).
-    var overbookingOk = true
-    val overbookingDetails = new StringBuilder()
-    links.foreach { link =>
-      LinkClass.values.foreach { linkClass =>
-        val avail = link.availableSeats(linkClass)
-        if (avail < 0) {
-          overbookingOk = false
-          overbookingDetails.append(s"link=${link.id} class=${linkClass.code} over=${-avail}\n")
+    val (overbookingOk, overbookingDetail) =
+      if (SimulationConfig.bookingOverbookingCheck) {
+        var ok = true
+        val details = new StringBuilder()
+        links.foreach { link =>
+          LinkClass.values.foreach { linkClass =>
+            val avail = link.availableSeats(linkClass)
+            if (avail < 0) {
+              ok = false
+              details.append(s"link=${link.id} class=${linkClass.code} over=${-avail}\n")
+            }
+          }
         }
+        if (ok) println(s"[BookingCheck] PASS (${links.size} links)")
+        else println(s"[BookingCheck] FAIL\n${details.toString()}")
+        (ok, details.toString())
+      } else {
+        (true, "")
       }
-    }
-    if (overbookingOk) println(s"[BookingCheck] PASS (${links.size} links)")
-    else println(s"[BookingCheck] FAIL\n${overbookingDetails.toString()}")
 
     println(s"[ParallelConsume] total consume phase: ${System.currentTimeMillis() - consumeStartTime} ms")
 
@@ -290,7 +298,7 @@ object PassengerSimulation {
     }
     val missedMap = missedMapBuilder.toMap
 
-    PassengerConsumptionResult(collapsedMap, missedMap, worldStatistics, overbookingOk, overbookingDetails.toString())
+    PassengerConsumptionResult(collapsedMap, missedMap, worldStatistics, overbookingOk, overbookingDetail)
   }
 
   val LINK_COST_TOLERANCE_FACTOR = Computation.LINK_COST_TOLERANCE_FACTOR //used by computePassengerSatisfaction

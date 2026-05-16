@@ -58,8 +58,10 @@ object MainSimulation extends App {
     }
 
     SimulationEventStream.publish(CycleStart(cycle, cycleStartTime), None)
-    invalidateCaches()
-    initializeCaches()
+    if (SimulationConfig.refreshCachesEveryCycle) {
+      invalidateCaches()
+      initializeCaches()
+    }
 
     timed("userSimulation") { UserSimulation.simulate(cycle) }
     println("Event simulation")
