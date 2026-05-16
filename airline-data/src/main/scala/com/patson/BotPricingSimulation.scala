@@ -20,8 +20,9 @@ object BotPricingSimulation {
     if (botAirlines.isEmpty) return
 
     val updatedLinks = mutable.ListBuffer[Link]()
-    // Cache competitor links per (fromId, toId) pair to avoid repeated DB calls
-    val competitorCache = mutable.Map[(Int, Int), List[Link]]()
+    // Load all flight links once, group by (from, to) — eliminates per-pair DB round-trips
+    val competitorsByPair: Map[(Int, Int), List[Link]] =
+      LinkSource.loadAllFlightLinks().groupBy(l => (l.from.id, l.to.id))
 
     botAirlines.foreach { airline =>
       val profile = profilesByName.getOrElse(airline.name, DEFAULT_PROFILE)
@@ -34,11 +35,8 @@ object BotPricingSimulation {
               .map { case (id, list) => id -> list.head }
 
           links.foreach { link =>
-            val competitors = competitorCache.getOrElseUpdate(
-              (link.from.id, link.to.id),
-              LinkSource.loadFlightLinksByAirports(link.from.id, link.to.id)
-                .filter(_.airline.id != airline.id)
-            )
+            val competitors = competitorsByPair.getOrElse((link.from.id, link.to.id), Nil)
+              .filter(_.airline.id != airline.id)
             val maybeConsumption = consumptionByLinkId.get(link.id)
             val newPrice = computeNewPrice(link, maybeConsumption, competitors, profile)
             if (newPrice != link.price) {

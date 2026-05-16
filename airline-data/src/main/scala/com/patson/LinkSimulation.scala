@@ -12,9 +12,10 @@ import com.patson.model.event.Olympics
 
 import scala.util.Random
 import com.patson.model.oil.OilPrice
-import com.patson.util.{AirportCache, AllianceCache}
+import com.patson.util.{AirplaneOwnershipCache, AirportCache, AllianceCache}
 
 import java.util.concurrent.ThreadLocalRandom
+import scala.collection.parallel.CollectionConverters._
 
 object LinkSimulation {
   val FUEL_UNIT_COST = OilPrice.DEFAULT_UNIT_COST * 98 //for easier flight monitoring, let's make it the default unit price here
@@ -25,34 +26,45 @@ object LinkSimulation {
   val CREW_EQ_EXPONENT = 1.95
 
 
-  def linkSimulation(cycle: Int) : (List[LinkConsumptionDetails], List[LoungeConsumptionDetails], immutable.Map[(PassengerGroup, Airport, Route), Int], immutable.Map[Int, AirlinePaxStat]) = {
+  def linkSimulation(cycle: Int) : (List[LinkConsumptionDetails], List[LoungeConsumptionDetails], immutable.Map[(PassengerGroup, Airport, Route), Int], immutable.Map[Int, AirlinePaxStat], Boolean) = {
     var startTime = System.currentTimeMillis()
 
     println("Loading all links")
     val links = LinkSource.loadAllLinks(LinkSource.FULL_LOAD)
     val flightLinks = links.filter(_.transportType == TransportType.FLIGHT).map(_.asInstanceOf[Link])
     println("Finished loading all links")
+    println(s"[lsim] loadAllLinks: ${System.currentTimeMillis() - startTime} ms")
+    startTime = System.currentTimeMillis()
 
     val allAirportStats = AirportStatisticsSource.loadAllAirportStats()
     val airportStatsLookup: immutable.Map[Int, AirportStatistics] = allAirportStats.map(stats => stats.airportId -> stats).toMap
 
     val demand = DemandGenerator.computeDemand(cycle, airportStatsLookup)
     println("DONE with demand total demand: " + demand.foldLeft(0) {
-      case(holder, (_, _, demandValue)) =>  
+      case(holder, (_, _, demandValue)) =>
         holder + demandValue
     })
+    println(s"[lsim] computeDemand: ${System.currentTimeMillis() - startTime} ms")
+    startTime = System.currentTimeMillis()
 
     val airportWeather = links.flatMap(link => mutable.Seq(link.from, link.to)).toSet.map { airport: Airport =>
       airport.id -> ThreadLocalRandom.current().nextDouble()
     }.toMap //weather to make the RNG more brown-noise, todo: should be exposed to players
     simulateLinkError(flightLinks, airportStatsLookup, airportWeather)
-    
-    val PassengerConsumptionResult(consumptionResult: scala.collection.immutable.Map[(PassengerGroup, Airport, Route), Int], missedPassengerResult: immutable.Map[(PassengerGroup, Airport), Int], worldStats: WorldStatistics) = PassengerSimulation.passengerConsume(demand, links)
+    println(s"[lsim] simulateLinkError: ${System.currentTimeMillis() - startTime} ms")
+    startTime = System.currentTimeMillis()
+
+    val passengerResult = PassengerSimulation.passengerConsume(demand, links)
+    val consumptionResult = passengerResult.consumptionByRoutes
+    val missedPassengerResult = passengerResult.missedDemand
+    val worldStats = passengerResult.worldStats
+    val overbookingOk = passengerResult.overbookingOk
+    println(s"[lsim] passengerConsume: ${System.currentTimeMillis() - startTime} ms")
 
     println("Tallying airline & stats")
     startTime = System.currentTimeMillis()
     val airlineStats = tallyPassengerTypesByAirline(consumptionResult)
-    Util.outputTimeDiff(startTime, "Tallying took ")
+    println(Util.outputTimeDiff(startTime, "[lsim] tallyAirlineStats:"))
 
     println("Tallying flight, airport, country stats")
     startTime = System.currentTimeMillis()
@@ -72,14 +84,14 @@ object LinkSimulation {
     }.toList
 
     val (linkStatistics, updatedAirportStatistics, countryMarketShares) = generateFlightStatistics(consumptionResult, cycle, flightMovementsByAirport, airportStatsLookup, worldStats)
-    Util.outputTimeDiff(startTime, "Tallying took ")
+    println(Util.outputTimeDiff(startTime, "[lsim] generateFlightStatistics:"))
 
     println("Saving generated stats to DB")
     startTime = System.currentTimeMillis()
     LinkStatisticsSource.deleteLinkStatisticsBeforeCycle(cycle - 2) //was cycle - 5
     LinkStatisticsSource.saveLinkStatistics(linkStatistics)
     AirportStatisticsSource.updateAllAirportStats(updatedAirportStatistics)
-    Util.outputTimeDiff(startTime, "Saved all stats. Took ")
+    println(Util.outputTimeDiff(startTime, "[lsim] saveStats:"))
 
     //save country market share (now generated in the same loop)
     println("Saving country market share to DB")
@@ -107,7 +119,7 @@ object LinkSimulation {
     startTime = System.currentTimeMillis()
     println("Saving " + consumptionResult.size +  " consumptions")
     ConsumptionHistorySource.updateConsumptions(consumptionResult)
-    Util.outputTimeDiff(startTime, "Saved all consumptions. Took ")
+    println(Util.outputTimeDiff(startTime, "[lsim] updateConsumptions:"))
 
     //save top 10 missed demand per origin airport
     startTime = System.currentTimeMillis()
@@ -130,30 +142,37 @@ object LinkSimulation {
         }
       }
     MissedDemandSource.deleteAndSave(topMissed)
-    Util.outputTimeDiff(startTime, "Saved missed demand. Took ")
+    println(Util.outputTimeDiff(startTime, "[lsim] saveMissedDemand:"))
 
     println("Calculating profits by links")
     startTime = System.currentTimeMillis()
-    val linkConsumptionDetails = ListBuffer[LinkConsumptionDetails]()
-    val loungeConsumptionDetails = ListBuffer[LoungeConsumptionDetails]()
     val allAirplaneAssignments: immutable.Map[Int, LinkAssignments] = AirplaneSource.loadAirplaneLinkAssignmentsByCriteria(List.empty)
-    //cost by link
-    val costByLink = mutable.HashMap[Transport, ListBuffer[PassengerCost]]()
-    consumptionResult.foreach {
-      case((passengerGroup, airport, route), passengerCount) => route.links.foreach { linkConsideration =>
-        costByLink.getOrElseUpdate(linkConsideration.link, ListBuffer[PassengerCost]()).append(PassengerCost(passengerGroup, passengerCount, linkConsideration.cost))
+    //cost by link — built sequentially then read-only in parallel map below
+    val costByLink: immutable.Map[Transport, List[PassengerCost]] = {
+      val builder = mutable.HashMap[Transport, ListBuffer[PassengerCost]]()
+      consumptionResult.foreach {
+        case((passengerGroup, airport, route), passengerCount) => route.links.foreach { linkConsideration =>
+          builder.getOrElseUpdate(linkConsideration.link, ListBuffer[PassengerCost]()).append(PassengerCost(passengerGroup, passengerCount, linkConsideration.cost))
+        }
       }
+      builder.view.mapValues(_.toList).toMap
     }
 
-    links.foreach {
-      case flightLink : Link =>
-        if (flightLink.capacity.total > 0) {
-          val (linkResult, loungeResult) = computeLinkAndLoungeConsumptionDetail(flightLink, cycle, allAirplaneAssignments, costByLink.getOrElse(flightLink, List.empty).toList)
-          linkConsumptionDetails += linkResult
-          loungeConsumptionDetails ++= loungeResult
-        }
-      case nonFlightLink => //only compute for flights (class Link), need consumptions for transit modal
-        linkConsumptionDetails += LinkConsumptionDetails(nonFlightLink, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, cycle)
+    // Pre-warm AirplaneOwnershipCache sequentially — prevents each parallel worker from
+    // opening its own DB connection on cache miss (triggers HikariCP leak warnings).
+    links.map(_.airline.id).distinct.foreach(AirplaneOwnershipCache.getOwnershipInfo)
+
+    val (linkConsumptionDetails, loungeConsumptionDetails) = {
+      val results = links.par.map {
+        case flightLink: Link if flightLink.capacity.total > 0 =>
+          val (linkResult, loungeResult) = computeLinkAndLoungeConsumptionDetail(flightLink, cycle, allAirplaneAssignments, costByLink.getOrElse(flightLink, List.empty))
+          (List(linkResult), loungeResult)
+        case _: Link =>
+          (Nil : List[LinkConsumptionDetails], Nil : List[LoungeConsumptionDetails])
+        case nonFlightLink =>
+          (List(LinkConsumptionDetails(nonFlightLink, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, cycle)), Nil : List[LoungeConsumptionDetails])
+      }.toList
+      (results.flatMap(_._1), results.flatMap(_._2))
     }
 
     purgeAlerts()
@@ -177,9 +196,9 @@ object LinkSimulation {
 
     LoungeHistorySource.updateConsumptions(loungeResult)
     LoungeHistorySource.deleteConsumptionsBeforeCycle(cycle)
-    Util.outputTimeDiff(startTime, "Finished calculation on profits by links & lounges. Took ")
+    println(Util.outputTimeDiff(startTime, "[lsim] profitAndLoungeDetail:"))
 
-    (linkConsumptionDetails.toList, loungeResult, consumptionResult, airlineStats)
+    (linkConsumptionDetails.toList, loungeResult, consumptionResult, airlineStats, overbookingOk)
   }
 
   case class PassengerCost(group : PassengerGroup, passengerCount : Int, cost : Double)
@@ -200,7 +219,7 @@ object LinkSimulation {
   )
 
   def simulateLinkError(links: List[Link], allAirportStats: immutable.Map[Int, AirportStatistics], airportWeather: immutable.Map[Int, Double]): Unit = {
-    links.foreach {
+    links.par.foreach {
       link => {
         val flights: List[Airplane] = link.getAssignedAirplanes().filter(_._1.isReady).flatMap {
           case (airplane, assignment) => List.fill(assignment.frequency)(airplane)
@@ -260,7 +279,7 @@ object LinkSimulation {
       }
     }
 
-    links.foreach { link =>
+    links.par.foreach { link =>
       if (link.cancellationCount > 0) {
         link.addCancelledSeats(link.capacityPerFlight() * link.cancellationCount)
       }
@@ -525,73 +544,69 @@ object LinkSimulation {
         airport.id -> BigDecimal(movements.toDouble / (1000 + airport.size * 950)).setScale(3, BigDecimal.RoundingMode.HALF_UP).toDouble
     }.toMap
 
-    val flightStatsBuilder = mutable.Map.empty[LinkStatisticsKey, (Int, Int)]
-    val airportStatsBuilder = mutable.Map.empty[Airport, (Int, Int)]
-    val countryStatsBuilder = mutable.Map.empty[String, mutable.Map[Int, Long]]
+    type FlightStats = mutable.Map[LinkStatisticsKey, (Int, Int)]
+    type AirportStats = mutable.Map[Airport, (Int, Int)]
+    type CountryStats = mutable.Map[String, mutable.Map[Int, Long]]
 
-    var processedCount = 0
-    val totalEntries = consumptionResult.size
-    val reportInterval = Math.max(10000, totalEntries / 20) // Report every 5% or at least every 10000 entries
+    println(s"Processing ${consumptionResult.size} consumption entries in parallel")
+    val (flightStatsBuilder, airportStatsBuilder, countryStatsBuilder) =
+      consumptionResult.par.aggregate(
+        (mutable.Map.empty[LinkStatisticsKey, (Int, Int)],
+         mutable.Map.empty[Airport, (Int, Int)],
+         mutable.Map.empty[String, mutable.Map[Int, Long]])
+      )(
+        { case ((fs, as, cs), ((paxGroup, _, route), passengerCount)) =>
+          val isPremium = paxGroup.preference.preferredLinkClass.level > 1
+          val premiumCount = if (isPremium) passengerCount else 0
 
-    // Suggest GC if we have a very large dataset
-    if (totalEntries > 100000) {
-      println(s"Large dataset detected (${totalEntries} entries). Suggesting GC before processing...")
-      System.gc()
-    }
+          route.links.zipWithIndex.foreach { case (link, i) =>
+            val key = createLinkStatisticsKey(link.link, link.inverted, i, route.links.size)
 
-    consumptionResult.foreach { case ((paxGroup, _, route), passengerCount) =>
-      try {
-        processedCount += 1
-        if (processedCount % reportInterval == 0) {
-          println(s"Processed $processedCount/$totalEntries entries (${(processedCount * 100.0 / totalEntries).toInt}%)")
-        }
+            val (cp, cpr) = fs.getOrElse(key, (0, 0))
+            fs(key) = (cp + passengerCount, cpr + premiumCount)
 
-        val isPremium = paxGroup.preference.preferredLinkClass.level > 1
-        val premiumCount = if (isPremium) passengerCount else 0
+            val (fp, ap) = as.getOrElse(link.from, (0, 0))
+            val newFp = if (i == 0) fp + passengerCount else fp
+            val newAp = if (link.link.transportType == TransportType.FLIGHT) ap + passengerCount else ap
+            as(link.from) = (newFp, newAp)
 
-        route.links.zipWithIndex.foreach { case (link, i) =>
-          val isFlipped = link.inverted
-          val key = createLinkStatisticsKey(link.link, isFlipped, i, route.links.size)
-
-          // Update flight stats
-          val (currentPax, currentPremium) = flightStatsBuilder.getOrElse(key, (0, 0))
-          flightStatsBuilder.put(key, (currentPax + passengerCount, currentPremium + premiumCount))
-
-          // Update airport stats
-          val isDeparture = i == 0
-          val (fromPax, allPax) = airportStatsBuilder.getOrElse(link.from, (0, 0))
-          val newFromPax = if (isDeparture) fromPax + passengerCount else fromPax
-          val newAllPax = if(link.link.transportType == TransportType.FLIGHT) allPax + passengerCount else allPax
-          airportStatsBuilder.put(link.from, (newFromPax, newAllPax))
-
-          // Update country stats
-          if (link.link.transportType == TransportType.FLIGHT) {
-            val airline = link.link.airline
-            val country = link.passengerGroup.fromAirport.countryCode
-            val airlinePassengers = countryStatsBuilder.getOrElseUpdate(country, mutable.Map[Int, Long]())
-            val currentSum : Long = airlinePassengers.getOrElse(airline.id, 0L)
-            airlinePassengers.put(airline.id, currentSum + passengerCount)
+            if (link.link.transportType == TransportType.FLIGHT) {
+              val country = link.passengerGroup.fromAirport.countryCode
+              val aMap = cs.getOrElseUpdate(country, mutable.Map[Int, Long]())
+              aMap(link.link.airline.id) = aMap.getOrElse(link.link.airline.id, 0L) + passengerCount
+            }
           }
+          (fs, as, cs)
+        },
+        { case ((fs1, as1, cs1), (fs2, as2, cs2)) =>
+          fs2.foreach { case (k, (p, pr)) =>
+            val (cp, cpr) = fs1.getOrElse(k, (0, 0))
+            fs1(k) = (cp + p, cpr + pr)
+          }
+          as2.foreach { case (airport, (fp, ap)) =>
+            val (cfp, cap) = as1.getOrElse(airport, (0, 0))
+            as1(airport) = (cfp + fp, cap + ap)
+          }
+          cs2.foreach { case (country, aMap2) =>
+            val aMap1 = cs1.getOrElseUpdate(country, mutable.Map[Int, Long]())
+            aMap2.foreach { case (airlineId, count) =>
+              aMap1(airlineId) = aMap1.getOrElse(airlineId, 0L) + count
+            }
+          }
+          (fs1, as1, cs1)
         }
-      } catch {
-        case e: Exception =>
-          println(s"Error processing entry at index $processedCount: ${e.getMessage}")
-      }
-    }
+      )
 
-    println(s"Finished processing all ${processedCount} entries")
-
-    val (flightStats, airportStats) = (flightStatsBuilder.toMap, airportStatsBuilder.toMap)
-    val linkStatistics = flightStats.map { case (key, (pax, premium)) =>
+    val linkStatistics = flightStatsBuilder.map { case (key, (pax, premium)) =>
       LinkStatistics(key, pax, premium, cycle)
     }.toList
 
-    println(s"Processing airport stats for ${airportStats.size} airports...")
+    println(s"Processing airport stats for ${airportStatsBuilder.size} airports...")
 
     val airportStatistics = if (worldStats.totalPax <= 0) {
       List.empty
     } else {
-      airportStats.map { case (airport, (fromPax, allPax)) =>
+      airportStatsBuilder.map { case (airport, (fromPax, allPax)) =>
         val airportStats = airportStatsLookup.getOrElse(airport.id, AirportStatistics(airport.id, 100, 100, 0.0, 0.0, 0.0))
         val smallAirportBoost = 1.5 - (10 - airport.size).toDouble / 20.0
         val localDemandMet = fromPax.toDouble / airportStats.baselineDemand

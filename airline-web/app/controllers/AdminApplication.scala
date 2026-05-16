@@ -1,6 +1,6 @@
 package controllers
 
-import com.patson.data.{AdminSource, AirlineSource, CycleSource, IpSource, UserSource, UserUuidSource}
+import com.patson.data.{AdminSource, AirlineSource, CycleSource, IpSource, SimulationPerformanceSource, UserSource, UserUuidSource}
 import com.patson.stream.CycleCompleted
 import com.patson.MainSimulation
 import websocket.ActorCenter
@@ -467,6 +467,46 @@ class AdminApplication @Inject()(cc: ControllerComponents) extends AbstractContr
       Ok(Json.toJson("Cache cleared"))
     } else {
       Forbidden("Not an admin user")
+    }
+  }
+
+  // No auth — local-dev only. Returns the last 20 per-cycle performance records.
+  def getSimPerformance() = Action {
+    try {
+      val records = SimulationPerformanceSource.loadRecent(20)
+      val json = records.map { r =>
+        Json.obj(
+          "cycle"           -> r.cycle,
+          "totalSeconds"    -> r.totalSeconds,
+          "phaseTimings"    -> Json.parse(r.phaseTimingsJson),
+          "cores"           -> r.cores,
+          "overbookingOk"   -> r.overbookingOk,
+          "overbookingDetail" -> r.overbookingDetail
+        )
+      }
+      Ok(Json.toJson(json))
+    } catch {
+      case e: Exception => InternalServerError(Json.obj("error" -> e.getMessage))
+    }
+  }
+
+  // No auth — local-dev only. Reports the overbooking status from the most recent cycle.
+  def simOverbookingCheck() = Action {
+    try {
+      SimulationPerformanceSource.loadRecent(1).headOption match {
+        case Some(r) =>
+          Ok(Json.obj(
+            "cycle"           -> r.cycle,
+            "overbookingOk"   -> r.overbookingOk,
+            "overbookingDetail" -> r.overbookingDetail,
+            "cores"           -> r.cores,
+            "totalSeconds"    -> r.totalSeconds
+          ))
+        case None =>
+          Ok(Json.obj("message" -> "No simulation performance records found yet"))
+      }
+    } catch {
+      case e: Exception => InternalServerError(Json.obj("error" -> e.getMessage))
     }
   }
 

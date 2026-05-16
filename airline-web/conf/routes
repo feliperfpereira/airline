@@ -262,6 +262,8 @@ GET      /admin/cache-clear              controllers.AdminApplication.clearCache
 GET      /admin/pool-stats               controllers.AdminApplication.getPoolStats()
 GET      /admin/request-stats            controllers.AdminApplication.getRequestStats()
 POST     /admin/request-stats/reset      controllers.AdminApplication.resetRequestStats()
+GET      /admin/sim-performance          controllers.AdminApplication.getSimPerformance()
+GET      /admin/sim-overbooking-check    controllers.AdminApplication.simOverbookingCheck()
 
 
 # Signup

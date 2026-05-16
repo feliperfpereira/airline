@@ -71,29 +71,49 @@ object ConsumptionHistorySource {
       connection.commit()
     }
 
-    // Phase 2: rotate tables using a fresh connection. DDL-only, completes in seconds,
-    // so c3p0 timeout cannot reclaim it mid-rotation.
+    // Phase 2: rotate tables using a fresh connection. DDL-only, completes in seconds.
+    // Uses one metadata query per table family to find existing numbered tables, then
+    // issues a single atomic RENAME TABLE instead of ~170 serial DDL statements.
     println("Rotating tables")
     Using.resource(Meta.getConnection()) { connection =>
       Using.resource(connection.createStatement()) { rotateStatement =>
-        // Rotate _N-1 → _N for i >= 2 (skip i=1; base→_1 is handled atomically below)
-        for (i <- MAX_CONSUMPTION_HISTORY_WEEK to 2 by -1) {
-          val fromTableName = PASSENGER_ROUTE_HISTORY_TABLE + "_" + (i - 1)
-          val toTableName = PASSENGER_ROUTE_HISTORY_TABLE + "_" + i
-          if (Meta.isTableExist(connection, fromTableName)) {
-            rotateStatement.executeUpdate(s"DROP TABLE IF EXISTS $toTableName")
-            rotateStatement.executeUpdate(s"RENAME TABLE $fromTableName TO $toTableName")
+
+        def batchRotate(baseTable: String): Unit = {
+          // Find which numbered slots (1..MAX-1) currently exist for this table family.
+          val prefix = baseTable + "_"
+          val existingNums = Using.resource(connection.prepareStatement(
+            "SELECT table_name FROM information_schema.tables " +
+            "WHERE table_schema = DATABASE() AND table_name LIKE ? " +
+            "AND table_name REGEXP ?"
+          )) { ps =>
+            ps.setString(1, prefix + "%")
+            ps.setString(2, s"^${java.util.regex.Pattern.quote(baseTable)}_[0-9]+$$")
+            Using.resource(ps.executeQuery()) { rs =>
+              val nums = scala.collection.mutable.ListBuffer[Int]()
+              while (rs.next()) {
+                val tname = rs.getString(1)
+                val numStr = tname.substring(prefix.length)
+                scala.util.Try(numStr.toInt).foreach { n =>
+                  if (n >= 1 && n < MAX_CONSUMPTION_HISTORY_WEEK) nums += n
+                }
+              }
+              nums.toList.sorted(Ordering[Int].reverse) // descending: 29, 28, ..., 1
+            }
+          }
+
+          if (existingNums.nonEmpty) {
+            // Drop the overflow slot to free it for the highest existing table.
+            rotateStatement.executeUpdate(s"DROP TABLE IF EXISTS ${baseTable}_${MAX_CONSUMPTION_HISTORY_WEEK}")
+
+            // Single RENAME TABLE: _N→_{N+1}, ..., _1→_2  (MySQL processes left-to-right,
+            // so each source is free by the time the next rename needs it as a destination).
+            val renamePairs = existingNums.map(n => s"${baseTable}_$n TO ${baseTable}_${n + 1}")
+            rotateStatement.executeUpdate("RENAME TABLE " + renamePairs.mkString(", "))
           }
         }
 
-        for (i <- MAX_CONSUMPTION_HISTORY_WEEK to 2 by -1) {
-          val fromTableName = PASSENGER_LINK_HISTORY_TABLE + "_" + (i - 1)
-          val toTableName = PASSENGER_LINK_HISTORY_TABLE + "_" + i
-          if (Meta.isTableExist(connection, fromTableName)) {
-            rotateStatement.executeUpdate(s"DROP TABLE IF EXISTS $toTableName")
-            rotateStatement.executeUpdate(s"RENAME TABLE $fromTableName TO $toTableName")
-          }
-        }
+        batchRotate(PASSENGER_ROUTE_HISTORY_TABLE)
+        batchRotate(PASSENGER_LINK_HISTORY_TABLE)
 
         // Atomically swap base→_1 and temp→base in a single RENAME TABLE statement.
         // If temp doesn't exist the whole statement is reverted, leaving base intact.

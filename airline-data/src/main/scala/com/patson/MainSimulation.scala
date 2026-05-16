@@ -7,6 +7,7 @@ import com.patson.data._
 import com.patson.stream.{CycleCompleted, CycleStart, SimulationEventStream}
 import com.patson.model.CountryAirlineTitle
 import com.patson.util.{AirlineCache, AirplaneOwnershipCache, AirportCache, AirportStatisticsCache}
+import scala.collection.mutable
 
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -41,6 +42,15 @@ object MainSimulation extends App {
 
   def startCycle(cycle : Int) = {
     val cycleStartTime = System.currentTimeMillis()
+    val phaseTimings = mutable.LinkedHashMap[String, Long]()
+
+    def timed[T](name: String)(block: => T): T = {
+      val t0 = System.currentTimeMillis()
+      val result = block
+      phaseTimings(name) = System.currentTimeMillis() - t0
+      result
+    }
+
     println("cycle " + cycle + " starting!")
     if (cycle == 1) { //initialize it
       OilSimulation.simulate(1)
@@ -51,37 +61,38 @@ object MainSimulation extends App {
     invalidateCaches()
     initializeCaches()
 
-    UserSimulation.simulate(cycle)
+    timed("userSimulation") { UserSimulation.simulate(cycle) }
     println("Event simulation")
-    EventSimulation.simulate(cycle)
+    timed("eventSimulation") { EventSimulation.simulate(cycle) }
     println("Event simulation done")
 
     println("Bot pricing simulation")
-    BotPricingSimulation.simulate(cycle)
+    timed("botPricingSimulation") { BotPricingSimulation.simulate(cycle) }
     println("Bot pricing simulation done")
 
     println("Link simulation starting")
-    val (flightLinkResult, loungeResult, linkRidershipDetails, paxStatsByAirlineId) = LinkSimulation.linkSimulation(cycle)
+    val (flightLinkResult, loungeResult, linkRidershipDetails, paxStatsByAirlineId, overbookingOk) =
+      timed("linkSimulation") { LinkSimulation.linkSimulation(cycle) }
     println("Link simulation done")
 
     println("Airport simulation")
-    val airportChampionInfo = AirportSimulation.airportSimulation(cycle, linkRidershipDetails)
+    val airportChampionInfo = timed("airportSimulation") { AirportSimulation.airportSimulation(cycle, linkRidershipDetails) }
     println("Airport simulation done")
 
     println("Alliance simulation")
-    AllianceSimulation.simulate(flightLinkResult, loungeResult, paxStatsByAirlineId, airportChampionInfo, cycle)
+    timed("allianceSimulation") { AllianceSimulation.simulate(flightLinkResult, loungeResult, paxStatsByAirlineId, airportChampionInfo, cycle) }
     println("Alliance simulation done")
 
     println("Airplane simulation")
-    val airplanes = AirplaneSimulation.airplaneSimulation(cycle)
+    val airplanes = timed("airplaneSimulation") { AirplaneSimulation.airplaneSimulation(cycle) }
     println("Airplane simulation done")
 
     println("Airline simulation")
-    AirlineSimulation.airlineSimulation(cycle, flightLinkResult, loungeResult, airplanes, paxStatsByAirlineId)
+    timed("airlineSimulation") { AirlineSimulation.airlineSimulation(cycle, flightLinkResult, loungeResult, airplanes, paxStatsByAirlineId) }
     println("Airline simulation done")
 
     println("Airplane model simulation")
-    AirplaneModelSimulation.simulate(cycle)
+    timed("airplaneModelSimulation") { AirplaneModelSimulation.simulate(cycle) }
     println("Airplane model simulation done")
 
     //purge history
@@ -93,8 +104,23 @@ object MainSimulation extends App {
     AirlineSource.deleteAirlineModifierByExpiry(cycle)
 
     val cycleEnd = System.currentTimeMillis()
+    val totalSeconds = ((cycleEnd - cycleStartTime) / 1000).toInt
 
-    println(">>>>> cycle " + cycle + " spent " + (cycleEnd - cycleStartTime) / 1000 + " secs")
+    println(">>>>> cycle " + cycle + " spent " + totalSeconds + " secs")
+
+    try {
+      SimulationPerformanceSource.save(
+        cycle          = cycle,
+        totalSeconds   = totalSeconds,
+        phaseTimings   = phaseTimings.toMap,
+        cores          = Runtime.getRuntime.availableProcessors,
+        overbookingOk  = overbookingOk,
+        overbookingDetail = ""
+      )
+    } catch {
+      case e: Exception => println(s"Failed to save simulation performance record: ${e.getMessage}")
+    }
+
     cycleEnd
   }
 

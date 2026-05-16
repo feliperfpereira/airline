@@ -2,6 +2,7 @@ package com.patson
 
 import java.util.{ArrayList, Collections}
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.ConcurrentHashMap
 import com.patson.data.{AirlineSource, AirportSource, AllianceSource, CountrySource, CycleSource, LinkSource, WorldStatisticsSource}
 import com.patson.model.{TransferSpecialization, _}
 import FlightPreferenceType._
@@ -30,9 +31,18 @@ object PassengerSimulation {
       .toSet
   }
   
-  case class PassengerConsumptionResult(consumptionByRoutes: Map[(PassengerGroup, Airport, Route), Int], missedDemand: Map[(PassengerGroup, Airport), Int], worldStats: WorldStatistics)
+  case class PassengerConsumptionResult(consumptionByRoutes: Map[(PassengerGroup, Airport, Route), Int], missedDemand: Map[(PassengerGroup, Airport), Int], worldStats: WorldStatistics, overbookingOk: Boolean = true, overbookingDetail: String = "")
+
+  // Locks links in a consistent order (by id) to prevent deadlock while still allowing
+  // concurrent booking of routes that don't share any physical link.
+  private def withLinksLocked[T](links: List[Transport])(body: => T): T = links match {
+    case Nil => body
+    case h :: t => h.synchronized { withLinksLocked(t)(body) }
+  }
 
   def passengerConsume[T <: Transport](demand : List[(PassengerGroup, Airport, Int)], links : List[T]) : PassengerConsumptionResult = {
+    val consumeStartTime = System.currentTimeMillis()
+    println(s"[ParallelConsume] cores=${Runtime.getRuntime.availableProcessors}")
     val consumptionResult = Collections.synchronizedList(new ArrayList[(PassengerGroup, Airport, Int, Route)]())
     val missedDemandChunks = Collections.synchronizedList(new ArrayList[(PassengerGroup, Airport, Int)]())
     val consumptionCycleMax = 9; //try and rebuild routes 10 times
@@ -61,10 +71,7 @@ object PassengerSimulation {
         missedDemandChunks.add(demandChunk)
       }
       isConnected
-    }).sortWith {
-      case ((pg1, _, demand1), (pg2, _, demand2)) =>
-        pg1.preference.getPreferenceType.priority < pg2.preference.getPreferenceType.priority //sort by pax preference purchase order
-    }
+    }).sortBy { case (pg, _, _) => pg.preference.getPreferenceType.priority }
 
     println("After pruning : " + demandChunks.size);
 
@@ -96,6 +103,7 @@ object PassengerSimulation {
     val externalCostModifier = ExternalCostModifier(airlineCostModifiers, specializationCostModifiers)
 
     while (consumptionCycleCount <= consumptionCycleMax) {
+      val loopStart = System.currentTimeMillis()
       println(s"Run loop $consumptionCycleCount for ${demandChunks.size} demand chunks")
 
       //using minSeats to have pax book together and decrease consumptions
@@ -138,7 +146,7 @@ object PassengerSimulation {
         else if (consumptionCycleCount < 7) 4
         else 5
       val isSingleTicket = if (consumptionCycleCount == 0 || consumptionCycleCount == 5) true else false
-      val allRoutesMap = mutable.HashMap[PassengerGroup, Map[Airport, Route]]()
+      val allRoutesMap = new ConcurrentHashMap[PassengerGroup, Map[Airport, Route]]()
 
       //start consuming routes
       //       println()
@@ -153,7 +161,7 @@ object PassengerSimulation {
       filteredDemandChunks.par.foreach {
         case (passengerGroup, toAirport, chunkSize) =>
           var hasComputedRouteMap = false
-          val toAirportRouteMap = allRoutesMap.getOrElseUpdate(passengerGroup, {
+          val toAirportRouteMap = allRoutesMap.computeIfAbsent(passengerGroup, _ => {
             hasComputedRouteMap = true
             findRoutesByPassengerGroup(passengerGroup, toAirports = requiredRoutes(passengerGroup), availableLinks, PassengerSimulation.countryOpenness, establishedAllianceIdByAirlineId, Some(externalCostModifier), iterationCount, isSingleTicket)
           })
@@ -165,30 +173,31 @@ object PassengerSimulation {
               val rejection = getRouteRejection(pickedRoute, fromAirport, toAirport, passengerGroup.preference.preferredLinkClass, passengerGroup.passengerType)
               rejection match {
                 case None =>
-                  synchronized {
-                    val consumptionSize = pickedRoute.links.foldLeft(chunkSize) { (foldInt, linkConsideration) =>
+                  // Lock all links in the route in a fixed global order (by id) to prevent
+                  // deadlock while allowing routes with disjoint link sets to book in parallel.
+                  val sortedLinks = pickedRoute.links.map(_.link).distinct.sortBy(_.id)
+                  val consumptionSize = withLinksLocked(sortedLinks) {
+                    val size = pickedRoute.links.foldLeft(chunkSize) { (foldInt, linkConsideration) =>
                       val actualLinkClass = linkConsideration.linkClass
                       val availableSeats = linkConsideration.link.availableSeats(actualLinkClass)
-                      if (availableSeats < foldInt) {
-                        availableSeats
-                      } else {
-                        foldInt
-                      }
+                      if (availableSeats < foldInt) availableSeats else foldInt
                     }
-                    //some capacity available on all the links, consume them NOMNOM NOM!
-                    if (consumptionSize > 0) {
+                    if (size > 0) {
                       pickedRoute.links.foreach { linkConsideration =>
                         val actualLinkClass = linkConsideration.linkClass
-                        linkConsideration.link.addSoldSeatsByClass(actualLinkClass, consumptionSize)
+                        linkConsideration.link.addSoldSeatsByClass(actualLinkClass, size)
                       }
-
-                      consumptionResult.add((passengerGroup, toAirport, consumptionSize, pickedRoute))
                     }
-                    //update the remaining demand chunk list
-                    if (consumptionSize < chunkSize) { //not enough capacity to completely fill
-                      //put a updated demand chunk
-                      remainingDemandChunks.add((passengerGroup, toAirport, chunkSize - consumptionSize));
-                    }
+                    size
+                  }
+                  //some capacity available on all the links, consume them NOMNOM NOM!
+                  if (consumptionSize > 0) {
+                    consumptionResult.add((passengerGroup, toAirport, consumptionSize, pickedRoute))
+                  }
+                  //update the remaining demand chunk list
+                  if (consumptionSize < chunkSize) { //not enough capacity to completely fill
+                    //put a updated demand chunk
+                    remainingDemandChunks.add((passengerGroup, toAirport, chunkSize - consumptionSize))
                   }
                 case Some(rejection) =>
                   import RouteRejectionReason._
@@ -214,12 +223,29 @@ object PassengerSimulation {
             }
           }
       }
-      println("Done!")
+      println(s"Done! (${System.currentTimeMillis() - loopStart} ms)")
 
       //now process the remainingDemandChunks in next cycle
       demandChunks = remainingDemandChunks.asScala.toList
       consumptionCycleCount += 1
     }
+
+    // Overbooking self-check: any negative availableSeats means sold > capacity (a bug).
+    var overbookingOk = true
+    val overbookingDetails = new StringBuilder()
+    links.foreach { link =>
+      LinkClass.values.foreach { linkClass =>
+        val avail = link.availableSeats(linkClass)
+        if (avail < 0) {
+          overbookingOk = false
+          overbookingDetails.append(s"link=${link.id} class=${linkClass.code} over=${-avail}\n")
+        }
+      }
+    }
+    if (overbookingOk) println(s"[BookingCheck] PASS (${links.size} links)")
+    else println(s"[BookingCheck] FAIL\n${overbookingDetails.toString()}")
+
+    println(s"[ParallelConsume] total consume phase: ${System.currentTimeMillis() - consumeStartTime} ms")
 
     println("Total chunks that consume something " + consumptionResult.size)
 
@@ -245,21 +271,21 @@ object PassengerSimulation {
     WorldStatisticsSource.saveWorldStats(List(worldStatistics))
 
     //collapse it now
-    val collapsedMap = consumptionResult.asScala.foldLeft(Map[(PassengerGroup, Airport, Route), Int]()) {
-      case (accumulatorMap, (passengerGroup, toAirport, passengerCount, route)) =>
-        val key = (passengerGroup, toAirport, route)
-        val currentCount = accumulatorMap.getOrElse(key, 0)
-        accumulatorMap.updated(key, currentCount + passengerCount)
+    val collapsedMapBuilder = new scala.collection.mutable.HashMap[(PassengerGroup, Airport, Route), Int]()
+    consumptionResult.asScala.foreach { case (passengerGroup, toAirport, passengerCount, route) =>
+      val key = (passengerGroup, toAirport, route)
+      collapsedMapBuilder(key) = collapsedMapBuilder.getOrElse(key, 0) + passengerCount
     }
+    val collapsedMap = collapsedMapBuilder.toMap
 
-    val missedMap = missedDemandChunks.asScala.foldLeft(Map[(PassengerGroup, Airport), Int]()) {
-      case (accumulatorMap, (passengerGroup, toAirport, passengerCount)) =>
-        val key = (passengerGroup, toAirport)
-        val currentCount = accumulatorMap.getOrElse(key, 0)
-        accumulatorMap.updated(key, currentCount + passengerCount)
+    val missedMapBuilder = new scala.collection.mutable.HashMap[(PassengerGroup, Airport), Int]()
+    missedDemandChunks.asScala.foreach { case (passengerGroup, toAirport, passengerCount) =>
+      val key = (passengerGroup, toAirport)
+      missedMapBuilder(key) = missedMapBuilder.getOrElse(key, 0) + passengerCount
     }
+    val missedMap = missedMapBuilder.toMap
 
-    PassengerConsumptionResult(collapsedMap, missedMap, worldStatistics)
+    PassengerConsumptionResult(collapsedMap, missedMap, worldStatistics, overbookingOk, overbookingDetails.toString())
   }
 
   val LINK_COST_TOLERANCE_FACTOR = Computation.LINK_COST_TOLERANCE_FACTOR //used by computePassengerSatisfaction

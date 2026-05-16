@@ -1,0 +1,60 @@
+[info] welcome to sbt 1.12.11 (Eclipse Adoptium Java 25.0.3)
+[info] loading settings for project airline-web-build from plugins.sbt...
+[info] loading project definition from C:\Users\felip\Projects\airline\airline-web\project
+[info] loading settings for project root from build.sbt...
+[info]   __              __
+[info]   \ \     ____   / /____ _ __  __
+[info]    \ \   / __ \ / // __ `// / / /
+[info]    / /  / /_/ // // /_/ // /_/ /
+[info]   /_/  / .___//_/ \__,_/ \__, /
+[info]       /_/               /____/
+[info] 
+[info] Version 3.0.9 running Java 25.0.3
+[info] 
+[info] Play is run entirely by the community. Please consider contributing and/or donating:
+[info] https://www.playframework.com/sponsors
+[info] 
+
+--- (Running the application, auto-reloading is enabled) ---
+
+[34mINFO [0;39m p.c.s.PekkoHttpServer - Listening for HTTP on /[0:0:0:0:0:0:0:0]:9000
+
+(Server started, use Enter to stop and go back to the console...)
+
+[34mINFO [0;39m p.a.h.HttpErrorHandlerExceptions - Registering exception handler: guice-provision-exception-handler
+[info] - org.apache.pekko.event.slf4j.Slf4jLogger - Slf4jLogger started
+[info] - play.api.http.EnabledFilters - Enabled Filters (see <https://www.playframework.com/documentation/latest/Filters>):
+
+    play.filters.headers.SecurityHeadersFilter
+    play.filters.hosts.AllowedHostsFilter
+    play.filters.gzip.GzipFilter
+    controllers.RequestStatsFilter
+
+[info] - play.api.Play - Application started (Dev)
+[warn] - play.api.Play - 
+You are using the deprecated global state to set and access the current running application. If you
+need an instance of Application, set play.allowGlobalApplication = false and use Dependency Injection instead.
+        
+!!!!!!!!!!!!!!!DB HOST IS localhost:3306
+!!!!!!!!!!!!!!!FINAL DB str jdbc:mysql://localhost:3306/airline?rewriteBatchedStatements=true&sslMode=DISABLED&useUnicode=true&characterEncoding=utf-8&allowPublicKeyRetrieval=true&socketTimeout=90000&connectTimeout=10000 with user root
+[warn] - com.zaxxer.hikari.HikariConfig - HikariPool-1 - idleTimeout has been set but has no effect because the pool is operating as a fixed size pool.
+[info] - com.zaxxer.hikari.HikariDataSource - HikariPool-1 - Starting...
+[info] - com.zaxxer.hikari.pool.HikariPool - HikariPool-1 - Added connection com.mysql.cj.jdbc.ConnectionImpl@558c98d0
+[info] - com.zaxxer.hikari.HikariDataSource - HikariPool-1 - Start completed.
+[info] - org.apache.pekko.event.slf4j.Slf4jLogger - Slf4jLogger started
+[info] - org.apache.pekko.event.slf4j.Slf4jLogger - Slf4jLogger started
+[warn] - org.apache.pekko.remote.RemoteActorRefProvider - Using the 'remote' ActorRefProvider directly, which is a low-level layer. For most use cases, the 'cluster' abstraction on top of remoting is more suitable instead.
+[warn] - org.apache.pekko.remote.RemoteActorRefProvider - Pekko Cluster not in use - Using Pekko Cluster is recommended if you need remote watch and deploy.
+[info] - org.apache.pekko.remote.artery.ArteryTransport - Remoting started with transport [Artery tcp]; listening on address [pekko://websocketActorSystem@127.0.0.1:2553] with UID [-8735156245043057074]
+!!!!!!!!!!!!!!!PEKKO ACTOR HOST IS 127.0.0.1:2552
+Connection to sim is healthy!
+Connection to sim is healthy!
+Connection to sim is healthy!
+Connection to sim is healthy!
+Connection to sim is healthy!
+Connection to sim is healthy!
+pekko://websocketActorSystem/user/local-main-actor cycle 54 completed, invalidating caches
+Pre-warm completed for cycle 54
+Connection to sim is healthy!
+Connection to sim is healthy!
+Connection to sim is healthy!
