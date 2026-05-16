@@ -110,6 +110,8 @@ object LinkStatisticsSource {
     Using.resource(Meta.getConnection()) { connection =>
       connection.setAutoCommit(false)
       Using.resource(connection.prepareStatement("INSERT INTO " + LINK_STATISTICS_TABLE + "(from_airport, to_airport, is_departure, is_destination, airline, passenger_count, premium_count, cycle) VALUES(?,?,?,?,?,?,?,?)")) { preparedStatement =>
+        val batchSize = 5000
+        var i = 0
         linkStatistics.foreach { linkStatisticsEntry =>
           preparedStatement.setInt(1, linkStatisticsEntry.key.fromAirport.id)
           preparedStatement.setInt(2, linkStatisticsEntry.key.toAirport.id)
@@ -120,6 +122,10 @@ object LinkStatisticsSource {
           preparedStatement.setInt(7, linkStatisticsEntry.premiumPax)
           preparedStatement.setInt(8, linkStatisticsEntry.cycle)
           preparedStatement.addBatch()
+          i += 1
+          if (i % batchSize == 0) {
+            preparedStatement.executeBatch()
+          }
         }
         preparedStatement.executeBatch()
       }
@@ -134,15 +140,15 @@ object LinkStatisticsSource {
     val batchSize = 10000
     var totalDeleted = 0
     var deleted = 0
-    do {
-      Using.resource(Meta.getConnection()) { connection =>
-        Using.resource(connection.prepareStatement("DELETE FROM " + LINK_STATISTICS_TABLE + " WHERE cycle < ? LIMIT " + batchSize)) { preparedStatement =>
+    Using.resource(Meta.getConnection()) { connection =>
+      Using.resource(connection.prepareStatement("DELETE FROM " + LINK_STATISTICS_TABLE + " WHERE cycle < ? LIMIT " + batchSize)) { preparedStatement =>
+        do {
           preparedStatement.setObject(1, cutoffCycle)
           deleted = preparedStatement.executeUpdate()
           totalDeleted += deleted
-        }
+        } while (deleted == batchSize)
       }
-    } while (deleted == batchSize)
+    }
     println("Deleted " + totalDeleted + " link statistics records")
     totalDeleted
   }

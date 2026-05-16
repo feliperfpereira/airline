@@ -59,7 +59,9 @@ object PassengerSimulation {
     println("Total active airports: " + activeAirportIds.size)
 
     println(">> Transfer base specs: " + transferBaseSpecializationDiscounts.size)
-    println(transferBaseSpecializationDiscounts)
+    if (transferBaseSpecializationDiscounts.size <= 50) {
+      println(transferBaseSpecializationDiscounts)
+    }
 
     println("Remove demand groups not covered by active airports, before " + demand.size);
 
@@ -228,6 +230,9 @@ object PassengerSimulation {
       //now process the remainingDemandChunks in next cycle
       demandChunks = remainingDemandChunks.asScala.toList
       consumptionCycleCount += 1
+      if (demandChunks.isEmpty) {
+        consumptionCycleCount = consumptionCycleMax + 1
+      }
     }
 
     // Overbooking self-check: any negative availableSeats means sold > capacity (a bug).
@@ -384,7 +389,8 @@ object PassengerSimulation {
     val furthestDistance = LINK_DISTANCE_TOLERANCE_FACTOR * findFurthestAirportDistance(passengerGroup.fromAirport, toAirports)
 
 //    linksList.foreach { link =>
-      linksList.filter(_.distance <= furthestDistance).foreach { link =>
+      linksList.foreach { link =>
+        if (link.distance <= furthestDistance) {
 
       //see if there are any seats for that class (or lower) left
       link.availableSeatsAtOrBelowClass(preferredLinkClass).foreach {
@@ -408,6 +414,7 @@ object PassengerSimulation {
             activeAirports.add(link.to.id)
           }
       }
+        }
     }
     //val links = linksList.toArray
     findShortestRoute(passengerGroup, toAirports, allVertices = activeAirports, linkConsiderations, establishedAllianceIdByAirlineId, iterationCount, isSingleTicket)

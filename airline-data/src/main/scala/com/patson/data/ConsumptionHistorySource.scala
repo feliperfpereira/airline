@@ -24,13 +24,14 @@ object ConsumptionHistorySource {
       }
 
       var routeId = 0
-      val batchSize = 1000
+      val batchSize = 5000
 
       Using.resource(connection.prepareStatement("INSERT INTO " + PASSENGER_ROUTE_HISTORY_TABLE_TEMP + " (route_id, passenger_count, home_country, home_airport, destination_airport, passenger_type, preference_type, preferred_link_class, route_cost) VALUES(?,?,?,?,?,?,?,?,?)")) { passengerRouteHistoryStatement =>
         Using.resource(connection.prepareStatement("INSERT INTO " + PASSENGER_LINK_HISTORY_TABLE_TEMP + " (route_id, link, link_class, inverted, cost, satisfaction) VALUES(?,?,?,?,?,?)")) { passengerLinkHistoryStatement =>
           consumptions.foreach {
             case((passengerGroup, _, route), passengerCount) => {
               routeId += 1
+              val preferredLinkClass = passengerGroup.preference.preferredLinkClass
 
               // Insert route data
               passengerRouteHistoryStatement.setInt(1, routeId)
@@ -46,7 +47,6 @@ object ConsumptionHistorySource {
 
               // Insert link data
               route.links.foreach { linkConsideration =>
-                val preferredLinkClass = passengerGroup.preference.preferredLinkClass
                 val satisfaction = Computation.computePassengerSatisfaction(linkConsideration.cost.toInt, linkConsideration.link.standardPrice(preferredLinkClass, passengerGroup.passengerType), linkConsideration.link.getLoadFactor, linkConsideration.link.getDelayRatio)
 
                 passengerLinkHistoryStatement.setInt(1, routeId)
