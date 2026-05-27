@@ -91,6 +91,8 @@ object Computation {
     distanceCache.computeIfAbsent(key, _ => Util.calculateDistance(fromAirport.latitude, fromAirport.longitude, toAirport.latitude, toAirport.longitude).toInt)
   }
 
+  val affinityCache = new ConcurrentHashMap[String, Int]()
+
   // is used independent of individual links, so must be globally accessible
   def getFlightCategory(fromAirport : Airport, toAirport : Airport): FlightCategory.Value = {
     //hard-coding home markets into the computation function to allow for independent "relation" values
@@ -125,6 +127,11 @@ object Computation {
    */
 
 def calculateAffinityValue(fromZone : String, toZone : String, relationship : Int) : Int = {
+  val key = fromZone + "|" + toZone + "|" + relationship
+  affinityCache.computeIfAbsent(key, _ => calculateAffinityValueInternal(fromZone, toZone, relationship))
+}
+
+private def calculateAffinityValueInternal(fromZone : String, toZone : String, relationship : Int) : Int = {
   val relationshipModifier =
     if (relationship >= 5) { //domestic
       5

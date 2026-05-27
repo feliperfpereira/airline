@@ -30,7 +30,17 @@ object PassengerSimulation {
       .map(base => (base.airline.id, base.airport.id))
       .toSet
   }
-  
+
+  // Lightweight directed edge shared across all passenger groups with the same preferred link class.
+  // Built once per consumption loop per link class, eliminating per-group consideration rebuilds.
+  private case class RouteEdge(link: Transport, linkClass: LinkClass, inverted: Boolean,
+                               indexFrom: Int, indexTo: Int) {
+    val fromId: Int   = if (inverted) link.to.id  else link.from.id
+    val toId:   Int   = if (inverted) link.from.id else link.to.id
+    def from: Airport = if (inverted) link.to      else link.from
+    def to:   Airport = if (inverted) link.from    else link.to
+  }
+
   case class PassengerConsumptionResult(consumptionByRoutes: Map[(PassengerGroup, Airport, Route), Int], missedDemand: Map[(PassengerGroup, Airport), Int], worldStats: WorldStatistics, overbookingOk: Boolean = true, overbookingDetail: String = "")
 
   // Locks links in a consistent order (by id) to prevent deadlock while still allowing
@@ -150,6 +160,7 @@ object PassengerSimulation {
         else 5
       val isSingleTicket = if (consumptionCycleCount == 0 || consumptionCycleCount == 5) true else false
       val allRoutesMap = new ConcurrentHashMap[PassengerGroup, Map[Airport, Route]]()
+      val (classEdges, loopVertexIndex, loopNVertices) = buildEdgesPerClass(availableLinks)
 
       //start consuming routes
       //       println()
@@ -166,7 +177,17 @@ object PassengerSimulation {
           var hasComputedRouteMap = false
           val toAirportRouteMap = allRoutesMap.computeIfAbsent(passengerGroup, _ => {
             hasComputedRouteMap = true
-            findRoutesByPassengerGroup(passengerGroup, toAirports = requiredRoutes(passengerGroup), availableLinks, PassengerSimulation.countryOpenness, establishedAllianceIdByAirlineId, Some(externalCostModifier), iterationCount, isSingleTicket)
+            findShortestRouteFast(
+              passengerGroup,
+              requiredRoutes(passengerGroup),
+              classEdges.getOrElse(passengerGroup.preference.preferredLinkClass, Array.empty[RouteEdge]),
+              loopNVertices,
+              loopVertexIndex,
+              establishedAllianceIdByAirlineId,
+              externalCostModifier,
+              iterationCount,
+              isSingleTicket
+            )
           })
 
           toAirportRouteMap.get(toAirport) match {
@@ -596,6 +617,194 @@ object PassengerSimulation {
       }  
     }
     
+    resultMap.toMap
+  }
+
+  // ─── Fast-path route-finding: shared topology per link class ────────────────
+
+  private def hasFreedomForEdge(edge: RouteEdge, originatingAirport: Airport): Boolean = {
+    val fromCC = edge.from.countryCode
+    val toCC   = edge.to.countryCode
+    if (fromCC == toCC)                                                       true
+    else if (fromCC == originatingAirport.countryCode)                        true
+    else if (edge.from.size >= 7)                                             true
+    else if (megaHqHeadquarterAirports.contains((edge.link.airline.id, edge.fromId))) true
+    else countryOpenness.getOrElse(fromCC, 0) >= Country.SIXTH_FREEDOM_MIN_OPENNESS
+  }
+
+  // Builds directed edges and a dense vertex index for one consumption loop.
+  // One pass over availableLinks covers all 4 link classes simultaneously.
+  private def buildEdgesPerClass(availableLinks: List[Transport])
+      : (Map[LinkClass, Array[RouteEdge]], java.util.HashMap[Int, Int], Int) = {
+
+    // Step 1: vertex index — airport id → dense index 0..nV-1
+    val vertexIds = new java.util.LinkedHashSet[Int]()
+    availableLinks.foreach { link => vertexIds.add(link.from.id); vertexIds.add(link.to.id) }
+    val nV = vertexIds.size()
+    val vertexIndex = new java.util.HashMap[Int, Int](nV * 2)
+    val vIter = vertexIds.iterator(); var vIdx = 0
+    while (vIter.hasNext) { vertexIndex.put(vIter.next(), vIdx); vIdx += 1 }
+
+    // Step 2: edges per link class (all 4 classes, single pass)
+    val edgeLists: Map[LinkClass, java.util.ArrayList[RouteEdge]] =
+      LinkClass.values.map(lc => lc -> new java.util.ArrayList[RouteEdge]()).toMap
+
+    availableLinks.foreach { link =>
+      val fIdx = vertexIndex.get(link.from.id)
+      val tIdx = vertexIndex.get(link.to.id)
+      LinkClass.values.foreach { preferredClass =>
+        link.availableSeatsAtOrBelowClass(preferredClass).foreach { case (matchingClass, _) =>
+          edgeLists(preferredClass).add(RouteEdge(link, matchingClass, false, fIdx, tIdx))
+          edgeLists(preferredClass).add(RouteEdge(link, matchingClass, true,  tIdx, fIdx))
+        }
+      }
+    }
+
+    val edgeArrays = edgeLists.map { case (lc, list) => lc -> list.toArray(Array.empty[RouteEdge]) }
+    (edgeArrays, vertexIndex, nV)
+  }
+
+  // Bellman-Ford over a pre-built shared edge array using dense primitive arrays.
+  // Eliminates per-group edge-list allocation and HashMap clone per BF iteration.
+  private def findShortestRouteFast(
+      passengerGroup       : PassengerGroup,
+      toAirports           : Set[Airport],
+      edges                : Array[RouteEdge],
+      nVertices            : Int,
+      vertexIndex          : java.util.HashMap[Int, Int],
+      allianceIdByAirlineId: java.util.Map[Int, Int],
+      externalCostModifier : ExternalCostModifier,
+      iterationCount       : Int,
+      isSingleTicket       : Boolean): Map[Airport, Route] = {
+
+    val from = passengerGroup.fromAirport
+    val fromIdx = vertexIndex.getOrDefault(from.id, -1)
+    if (fromIdx < 0 || edges.isEmpty) return Map.empty
+
+    // Mirrors findRoutesByPassengerGroup's furthestDistance guard
+    val furthestDist =
+      if (toAirports.isEmpty) 0.0
+      else toAirports.map(a => Computation.calculateDistance(from, a)).max * LINK_DISTANCE_TOLERANCE_FACTOR
+
+    // BF state — dense arrays, no HashMap clones
+    val dist     = Array.fill(nVertices)(Double.MaxValue / 2)
+    val predEdge = new Array[RouteEdge](nVertices)
+    val predCost = new Array[Double](nVertices)
+    dist(fromIdx) = 0.0
+
+    val activeSet = new java.util.BitSet(nVertices)
+    activeSet.set(fromIdx)
+
+    val edgeLen = edges.length
+    var iter = 0
+    while (iter < iterationCount && !activeSet.isEmpty) {
+      val prevActive   = activeSet.clone().asInstanceOf[java.util.BitSet]
+      val prevPredEdge = java.util.Arrays.copyOf(predEdge, nVertices)
+      val newActive    = new java.util.BitSet(nVertices)
+
+      var ei = 0
+      while (ei < edgeLen) {
+        val edge = edges(ei)
+        if (prevActive.get(edge.indexFrom) && edge.link.distance <= furthestDist) {
+          if (hasFreedomForEdge(edge, from)) {
+            val prevPred = prevPredEdge(edge.indexFrom)
+            var connectionCost = 0.0
+            var isValid = true
+
+            if (prevPred != null) {
+              val prevLink = prevPred.link
+              if (edge.link.id == prevLink.id) {
+                isValid = false
+              } else if (prevLink.transportType == TransportType.GENERIC_TRANSIT &&
+                         edge.link.transportType == TransportType.GENERIC_TRANSIT) {
+                isValid = false
+              } else if (prevLink.transportType == TransportType.GENERIC_TRANSIT) {
+                connectionCost =
+                  if (prevLink.from.id == from.id || prevLink.to.id == from.id) 0 else 250
+              } else if (edge.link.transportType == TransportType.GENERIC_TRANSIT) {
+                connectionCost = 0
+              } else {
+                val transferDiscount =
+                  transferBaseSpecializationDiscounts.get((edge.fromId, edge.link.airline.id))
+                connectionCost =
+                  if (transferDiscount.exists(_.paxType.contains(passengerGroup.passengerType)))
+                    24 * TravelerTransferSpecialization.transferCostDiscount
+                  else 24
+
+                val frequency = Math.max(prevLink.frequencyByClass(prevPred.linkClass),
+                                         edge.link.frequencyByClass(edge.linkClass))
+                if      (frequency < 7)        connectionCost += 165 + (7  - frequency) * 10
+                else if (frequency < 14)       connectionCost += 65  + (14 - frequency) * 10
+                else if (frequency <= 49)      connectionCost += 98  - frequency * 2
+
+                val prevAirlineId = prevLink.airline.id
+                val currAirlineId = edge.link.airline.id
+                if (prevAirlineId != currAirlineId &&
+                    (allianceIdByAirlineId.get(prevAirlineId) == null.asInstanceOf[Int] ||
+                     allianceIdByAirlineId.get(prevAirlineId) != allianceIdByAirlineId.get(currAirlineId))) {
+                  connectionCost += 40
+                  if (isSingleTicket) isValid = false
+                }
+              }
+
+              connectionCost *= Math.min(1.0, 0.4 + 0.6 * from.income.toDouble / Airport.HIGH_INCOME)
+              connectionCost *= passengerGroup.preference.preferredLinkClass.spaceMultiplier
+              connectionCost *= passengerGroup.preference.connectionCostRatio
+            }
+
+            if (isValid) {
+              val modVal   = externalCostModifier.value(edge.link, edge.linkClass, passengerGroup.passengerType)
+              val edgeCost = Math.max(0.0, passengerGroup.preference.computeCost(
+                edge.link, edge.linkClass, passengerGroup.passengerType, modVal) + connectionCost)
+              val newDist  = dist(edge.indexFrom) + edgeCost
+              if (newDist < dist(edge.indexTo)) {
+                dist(edge.indexTo)     = newDist
+                predEdge(edge.indexTo) = edge
+                predCost(edge.indexTo) = edgeCost
+                newActive.set(edge.indexTo)
+              }
+            }
+          }
+        }
+        ei += 1
+      }
+
+      activeSet.clear()
+      activeSet.or(newActive)
+      iter += 1
+    }
+
+    // Route reconstruction: walk back from each destination via predecessor edges
+    val resultMap = scala.collection.mutable.Map[Airport, Route]()
+    toAirports.foreach { to =>
+      val toVIdx = vertexIndex.getOrDefault(to.id, -1)
+      if (toVIdx >= 0) {
+        if (predEdge(toVIdx) != null) {
+          var walkerIdx     = toVIdx
+          var noSolution    = false
+          var foundSolution = false
+          var hasFlight     = false
+          val route = new scala.collection.mutable.ListBuffer[LinkConsideration]()
+
+          while (!foundSolution && !noSolution) {
+            val pe = predEdge(walkerIdx)
+            if (pe != null) {
+              route.prepend(LinkConsideration.getExplicit(pe.link, predCost(walkerIdx), pe.linkClass, pe.inverted))
+              if (pe.link.transportType == TransportType.FLIGHT) hasFlight = true
+              walkerIdx = pe.indexFrom
+              if (walkerIdx == fromIdx && hasFlight) foundSolution = true
+            } else {
+              noSolution = true
+            }
+          }
+
+          if (foundSolution) {
+            resultMap(to) = Route(route.toList, dist(toVIdx))
+          }
+        }
+      }
+    }
+
     resultMap.toMap
   }
 

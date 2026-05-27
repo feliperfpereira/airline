@@ -1,6 +1,6 @@
 package com.patson
 
-import com.patson.data.{AirportSource, CountrySource, CycleSource, DestinationSource, EventSource, GameConstants}
+import com.patson.data.{CountrySource, CycleSource, DestinationSource, EventSource, GameConstants}
 import com.patson.model.event.{EventType, Olympics}
 import com.patson.model.{PassengerType, _}
 import com.patson.util.AirportCache
@@ -180,15 +180,17 @@ object DemandGenerator {
   def computeDemand(cycle: Int, airportStats: immutable.Map[Int, AirportStatistics]): List[(PassengerGroup, Airport, Int)] = {
     val cyclePhaseLength = CycleSource.loadAndUpdateCyclePhase() //average length is 45
     println("Loading airports")
-    val airports: List[Airport] = AirportSource.loadAllAirports(true).filter { airport =>
+    val airports: List[Airport] = AirportCache.getAllAirports(true).filter { airport =>
       airport.iata != "" && airport.popMiddleIncome > 0
     }
     println(s"Loaded ${airports.size} airports")
     val countryRelationships = CountrySource.getCountryMutualRelationships()
     val destinationList = DestinationSource.loadAllEliteDestinations()
 
+    val prefPoolCache = new java.util.concurrent.ConcurrentHashMap[Int, FlightPreferencePool]()
+
     val computedDemandChunks = airports.par.flatMap { fromAirport =>
-      val flightPreferencesPool = getFlightPreferencePoolOnAirport(fromAirport)
+      val flightPreferencesPool = prefPoolCache.computeIfAbsent(fromAirport.id, _ => getFlightPreferencePoolOnAirport(fromAirport))
       val hubAirportsDemands = generateHubAirportDemand(fromAirport, cycle)
 
       // Generate chunks for demand to all other regular airports
@@ -229,7 +231,7 @@ object DemandGenerator {
     val eventDemand = generateEventDemand(cycle, airports)
     val eventDemandChunks = eventDemand.flatMap {
       case (fromAirport, toAirportsWithDemand) =>
-        val flightPreferencesPool = getFlightPreferencePoolOnAirport(fromAirport)
+        val flightPreferencesPool = prefPoolCache.computeIfAbsent(fromAirport.id, _ => getFlightPreferencePoolOnAirport(fromAirport))
         toAirportsWithDemand.flatMap {
           case (toAirport, (passengerType, demand)) =>
             generateChunksForPassengerType(demand, fromAirport, toAirport, passengerType, flightPreferencesPool, Map.empty, cycle, cyclePhaseLength) //pass empty map to bypass travelRate and randomizer

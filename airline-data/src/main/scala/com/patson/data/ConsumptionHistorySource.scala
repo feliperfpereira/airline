@@ -8,67 +8,88 @@ import scala.util.Using
 
 
 object ConsumptionHistorySource {
-  var MAX_CONSUMPTION_HISTORY_WEEK = 30
+  var MAX_CONSUMPTION_HISTORY_WEEK = 12
 
   val updateConsumptions = (consumptions : Map[(PassengerGroup, Airport, Route), Int]) => {
-    // Phase 1: fill temp tables. Uses its own connection so that c3p0's
-    // unreturnedConnectionTimeout cannot reclaim this connection mid-rotation
-    // and leave the base table renamed away with no replacement.
+    import scala.concurrent._
+    import scala.concurrent.duration._
+    import java.util.concurrent.{Executors, TimeUnit => JTimeUnit}
+
+    // Phase 1: Create temp tables (DDL, separate connection)
     Using.resource(Meta.getConnection()) { connection =>
-      connection.setAutoCommit(false)
       Using.resource(connection.createStatement()) { ddlStatement =>
         ddlStatement.executeUpdate("DROP TABLE IF EXISTS " + PASSENGER_ROUTE_HISTORY_TABLE_TEMP)
         ddlStatement.executeUpdate("DROP TABLE IF EXISTS " + PASSENGER_LINK_HISTORY_TABLE_TEMP)
         ddlStatement.executeUpdate("CREATE TABLE " + PASSENGER_ROUTE_HISTORY_TABLE_TEMP + " LIKE " + PASSENGER_ROUTE_HISTORY_TABLE)
         ddlStatement.executeUpdate("CREATE TABLE " + PASSENGER_LINK_HISTORY_TABLE_TEMP + " LIKE " + PASSENGER_LINK_HISTORY_TABLE)
       }
+    }
 
-      var routeId = 0
+    // Phase 2: Parallel insert — each thread gets a disjoint route_id range
+    val consumptionSeq = consumptions.toIndexedSeq
+    val totalRoutes = consumptionSeq.size
+    if (totalRoutes > 0) {
+      val nThreads = math.min(Runtime.getRuntime.availableProcessors(), 8)
+      val chunkSize = math.ceil(totalRoutes.toDouble / nThreads).toInt
       val batchSize = 5000
+      val executor = Executors.newFixedThreadPool(nThreads)
+      implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(executor)
 
-      Using.resource(connection.prepareStatement("INSERT INTO " + PASSENGER_ROUTE_HISTORY_TABLE_TEMP + " (route_id, passenger_count, home_country, home_airport, destination_airport, passenger_type, preference_type, preferred_link_class, route_cost) VALUES(?,?,?,?,?,?,?,?,?)")) { passengerRouteHistoryStatement =>
-        Using.resource(connection.prepareStatement("INSERT INTO " + PASSENGER_LINK_HISTORY_TABLE_TEMP + " (route_id, link, link_class, inverted, cost, satisfaction) VALUES(?,?,?,?,?,?)")) { passengerLinkHistoryStatement =>
-          consumptions.foreach {
-            case((passengerGroup, _, route), passengerCount) => {
-              routeId += 1
-              val preferredLinkClass = passengerGroup.preference.preferredLinkClass
-
-              // Insert route data
-              passengerRouteHistoryStatement.setInt(1, routeId)
-              passengerRouteHistoryStatement.setInt(2, passengerCount) //passenger_count
-              passengerRouteHistoryStatement.setString(3, passengerGroup.fromAirport.countryCode) //home_country
-              passengerRouteHistoryStatement.setInt(4, passengerGroup.fromAirport.id) //home_airport
-              passengerRouteHistoryStatement.setInt(5, route.links.last.to.id) //destination_airport
-              passengerRouteHistoryStatement.setInt(6, passengerGroup.passengerType.id) //passenger_type
-              passengerRouteHistoryStatement.setInt(7, passengerGroup.preference.getPreferenceType.id) //preference_type
-              passengerRouteHistoryStatement.setString(8, passengerGroup.preference.preferredLinkClass.code) //preferred_link_class
-              passengerRouteHistoryStatement.setInt(9, route.totalCost.toInt) //route_cost
-              passengerRouteHistoryStatement.addBatch()
-
-              // Insert link data
-              route.links.foreach { linkConsideration =>
-                val satisfaction = Computation.computePassengerSatisfaction(linkConsideration.cost.toInt, linkConsideration.link.standardPrice(preferredLinkClass, passengerGroup.passengerType), linkConsideration.link.getLoadFactor, linkConsideration.link.getDelayRatio)
-
-                passengerLinkHistoryStatement.setInt(1, routeId)
-                passengerLinkHistoryStatement.setInt(2, linkConsideration.link.id)
-                passengerLinkHistoryStatement.setString(3, linkConsideration.linkClass.code)
-                passengerLinkHistoryStatement.setBoolean(4, linkConsideration.inverted)
-                passengerLinkHistoryStatement.setDouble(5, linkConsideration.cost)
-                passengerLinkHistoryStatement.setDouble(6, satisfaction)
-                passengerLinkHistoryStatement.addBatch()
-              }
-
-              if (routeId % batchSize == 0) {
-                passengerRouteHistoryStatement.executeBatch()
-                passengerLinkHistoryStatement.executeBatch()
+      val futures: List[Future[Unit]] = consumptionSeq.grouped(chunkSize).zipWithIndex.map { case (chunk, threadIdx) =>
+        val startRouteId = threadIdx * chunkSize + 1
+        Future {
+          Using.resource(Meta.getConnection()) { conn =>
+            conn.setAutoCommit(false)
+            Using.resource(conn.prepareStatement("INSERT INTO " + PASSENGER_ROUTE_HISTORY_TABLE_TEMP +
+              " (route_id, passenger_count, home_country, home_airport, destination_airport, passenger_type, preference_type, preferred_link_class, route_cost) VALUES(?,?,?,?,?,?,?,?,?)")) { routeStmt =>
+              Using.resource(conn.prepareStatement("INSERT INTO " + PASSENGER_LINK_HISTORY_TABLE_TEMP +
+                " (route_id, link, link_class, inverted, cost, satisfaction) VALUES(?,?,?,?,?,?)")) { linkStmt =>
+                var localBatchCount = 0
+                chunk.zipWithIndex.foreach { case (((passengerGroup, _, route), passengerCount), idx) =>
+                  val routeId = startRouteId + idx
+                  val preferredLinkClass = passengerGroup.preference.preferredLinkClass
+                  routeStmt.setInt(1, routeId)
+                  routeStmt.setInt(2, passengerCount)
+                  routeStmt.setString(3, passengerGroup.fromAirport.countryCode)
+                  routeStmt.setInt(4, passengerGroup.fromAirport.id)
+                  routeStmt.setInt(5, route.links.last.to.id)
+                  routeStmt.setInt(6, passengerGroup.passengerType.id)
+                  routeStmt.setInt(7, passengerGroup.preference.getPreferenceType.id)
+                  routeStmt.setString(8, preferredLinkClass.code)
+                  routeStmt.setInt(9, route.totalCost.toInt)
+                  routeStmt.addBatch()
+                  route.links.foreach { lc =>
+                    val satisfaction = Computation.computePassengerSatisfaction(
+                      lc.cost.toInt, lc.link.standardPrice(preferredLinkClass, passengerGroup.passengerType),
+                      lc.link.getLoadFactor, lc.link.getDelayRatio)
+                    linkStmt.setInt(1, routeId)
+                    linkStmt.setInt(2, lc.link.id)
+                    linkStmt.setString(3, lc.linkClass.code)
+                    linkStmt.setBoolean(4, lc.inverted)
+                    linkStmt.setDouble(5, lc.cost)
+                    linkStmt.setDouble(6, satisfaction)
+                    linkStmt.addBatch()
+                  }
+                  localBatchCount += 1
+                  if (localBatchCount % batchSize == 0) {
+                    routeStmt.executeBatch()
+                    linkStmt.executeBatch()
+                  }
+                }
+                routeStmt.executeBatch()
+                linkStmt.executeBatch()
               }
             }
+            conn.commit()
           }
-          passengerRouteHistoryStatement.executeBatch()
-          passengerLinkHistoryStatement.executeBatch()
         }
+      }.toList
+
+      try {
+        Await.result(Future.sequence(futures), Duration(120, JTimeUnit.SECONDS))
+      } finally {
+        executor.shutdown()
       }
-      connection.commit()
     }
 
     // Phase 2: rotate tables using a fresh connection. DDL-only, completes in seconds.
