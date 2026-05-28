@@ -84,10 +84,10 @@ object Computation {
     if (value < 0) 0 else value.toInt
   }
   
-  val distanceCache = new ConcurrentHashMap[String, Int]()
+  val distanceCache = new ConcurrentHashMap[Long, Int]()
 
   def calculateDistance(fromAirport: Airport, toAirport: Airport) : Int = {
-    val key = s"${fromAirport.id}_${toAirport.id}"
+    val key = (fromAirport.id.toLong << 32) | (toAirport.id.toLong & 0xFFFFFFFFL)
     distanceCache.computeIfAbsent(key, _ => Util.calculateDistance(fromAirport.latitude, fromAirport.longitude, toAirport.latitude, toAirport.longitude).toInt)
   }
 
@@ -324,9 +324,22 @@ def constructAffinityText(fromZone : String, toZone : String, fromCountry : Stri
     (expectedTimeToCruise + distance.toDouble * 60 / expectedSpeed).toInt
   }
 
+  // Pre-grouped airport cache to avoid O(N) country filter on every getAirportWithinRange call
+  @volatile private var airportsByCountrySnapshot: (Int, Map[String, List[Airport]]) = (0, Map.empty)
+
+  private def getAirportsByCountry(): Map[String, List[Airport]] = {
+    val all = AirportCache.getAllAirports()
+    val snap = airportsByCountrySnapshot
+    if (snap._1 != all.size) {
+      val grouped = all.groupBy(_.countryCode)
+      airportsByCountrySnapshot = (all.size, grouped)
+      grouped
+    } else snap._2
+  }
+
   def getAirportWithinRange(principalAirport: Airport, range: Int, minRange: Int = 0, isDomestic: Boolean = true): List[Airport] = { //range in km
     val affectedAirports = ListBuffer[Airport]()
-    val allAirports = if (isDomestic) AirportCache.getAllAirports().filter(_.countryCode == principalAirport.countryCode) else AirportCache.getAllAirports()
+    val allAirports = if (isDomestic) getAirportsByCountry().getOrElse(principalAirport.countryCode, List.empty) else AirportCache.getAllAirports()
     allAirports.foreach { airport =>
       val distance = Computation.calculateDistance(principalAirport, airport)
       if (distance <= range && distance >= minRange) {

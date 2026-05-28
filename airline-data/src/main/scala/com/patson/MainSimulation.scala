@@ -4,9 +4,9 @@ import java.util.concurrent.TimeUnit
 import org.apache.pekko.actor.Props
 import org.apache.pekko.actor.Actor
 import com.patson.data._
-import com.patson.stream.{CycleCompleted, CycleStart, SimulationEventStream}
+import com.patson.stream.{CycleCompleted, CyclePhaseUpdate, CycleStart, SimulationEventStream}
 import com.patson.model.CountryAirlineTitle
-import com.patson.util.{AirlineCache, AirplaneOwnershipCache, AirportCache, AirportStatisticsCache}
+import com.patson.util.{AirlineCache, AirplaneOwnershipCache, AirportCache, AirportStatisticsCache, PhaseTimings, PhaseWatchdog}
 import scala.collection.mutable
 
 import scala.concurrent.Await
@@ -43,13 +43,21 @@ object MainSimulation extends App {
   def startCycle(cycle : Int) = {
     val cycleStartTime = System.currentTimeMillis()
     val phaseTimings = mutable.LinkedHashMap[String, Long]()
+    val watchdog = if (SimulationConfig.watchdogEnabled) Some(new PhaseWatchdog(cycle, SimulationConfig.watchdogThresholdSeconds)) else None
+
+    val totalPhases = 9
+    var phaseIdx = 0
 
     def timed[T](name: String)(block: => T): T = {
+      SimulationEventStream.publish(CyclePhaseUpdate(cycle, phaseIdx, totalPhases, name), None)
+      phaseIdx += 1
       val t0 = System.currentTimeMillis()
-      val result = block
+      val result = watchdog.fold(block)(_.watch(name)(block))
       phaseTimings(name) = System.currentTimeMillis() - t0
       result
     }
+
+    val jfrRecording: Option[Any] = if (SimulationConfig.captureJfr) startJfr(cycle) else None
 
     println("cycle " + cycle + " starting!")
     if (cycle == 1) { //initialize it
@@ -110,11 +118,16 @@ object MainSimulation extends App {
 
     println(">>>>> cycle " + cycle + " spent " + totalSeconds + " secs")
 
+    watchdog.foreach(_.shutdown())
+    stopJfr(cycle, jfrRecording)
+
+    val subPhaseTimings = PhaseTimings.drain()
+
     try {
       SimulationPerformanceSource.save(
         cycle          = cycle,
         totalSeconds   = totalSeconds,
-        phaseTimings   = phaseTimings.toMap,
+        phaseTimings   = phaseTimings.toMap ++ subPhaseTimings,
         cores          = Runtime.getRuntime.availableProcessors,
         overbookingOk  = overbookingOk,
         overbookingDetail = ""
@@ -124,6 +137,37 @@ object MainSimulation extends App {
     }
 
     cycleEnd
+  }
+
+  private def startJfr(cycle: Int): Option[Any] = {
+    try {
+      val rec = new jdk.jfr.Recording()
+      rec.enable("jdk.CPUSample")
+      rec.enable("jdk.JavaMonitorWait")
+      rec.enable("jdk.ObjectAllocationInNewTLAB")
+      rec.enable("jdk.GCPhasePause")
+      rec.start()
+      println(s"[JFR] Recording started for cycle $cycle")
+      Some(rec)
+    } catch {
+      case e: Exception =>
+        println(s"[JFR] Failed to start recording: ${e.getMessage}")
+        None
+    }
+  }
+
+  private def stopJfr(cycle: Int, recording: Option[Any]): Unit = recording.foreach {
+    case rec: jdk.jfr.Recording =>
+      try {
+        new java.io.File("recordings").mkdirs()
+        val path = java.nio.file.Paths.get(s"recordings/cycle-$cycle.jfr")
+        rec.dump(path)
+        rec.close()
+        println(s"[JFR] Saved: $path")
+      } catch {
+        case e: Exception => println(s"[JFR] Failed to save recording: ${e.getMessage}")
+      }
+    case _ =>
   }
 
   /**

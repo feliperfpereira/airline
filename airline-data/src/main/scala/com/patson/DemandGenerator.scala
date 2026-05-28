@@ -5,7 +5,9 @@ import com.patson.model.event.{EventType, Olympics}
 import com.patson.model.{PassengerType, _}
 import com.patson.util.AirportCache
 
+import com.patson.util.PhaseTimings
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.atomic.AtomicLong
 import scala.collection.{immutable, mutable}
 import scala.collection.mutable.ListBuffer
 import scala.collection.parallel.CollectionConverters._
@@ -178,6 +180,7 @@ object DemandGenerator {
   }
 
   def computeDemand(cycle: Int, airportStats: immutable.Map[Int, AirportStatistics]): List[(PassengerGroup, Airport, Int)] = {
+    var t0 = System.currentTimeMillis()
     val cyclePhaseLength = CycleSource.loadAndUpdateCyclePhase() //average length is 45
     println("Loading airports")
     val airports: List[Airport] = AirportCache.getAllAirports(true).filter { airport =>
@@ -186,44 +189,53 @@ object DemandGenerator {
     println(s"Loaded ${airports.size} airports")
     val countryRelationships = CountrySource.getCountryMutualRelationships()
     val destinationList = DestinationSource.loadAllEliteDestinations()
+    PhaseTimings.record("computeDemand.dbLoad", System.currentTimeMillis() - t0)
 
+    val airportsIdx: IndexedSeq[Airport] = airports.toIndexedSeq
+    val N = airportsIdx.size
     val prefPoolCache = new java.util.concurrent.ConcurrentHashMap[Int, FlightPreferencePool]()
+    val hubNs = new AtomicLong(0L)
 
+    t0 = System.currentTimeMillis()
     val computedDemandChunks = airports.par.flatMap { fromAirport =>
       val flightPreferencesPool = prefPoolCache.computeIfAbsent(fromAirport.id, _ => getFlightPreferencePoolOnAirport(fromAirport))
-      val hubAirportsDemands = generateHubAirportDemand(fromAirport, cycle)
 
-      // Generate chunks for demand to all other regular airports
-      val regularDemandChunks = airports.flatMap { toAirport =>
+      val t1 = System.nanoTime()
+      val hubAirportsDemands = generateHubAirportDemand(fromAirport, cycle)
+      hubNs.addAndGet(System.nanoTime() - t1)
+
+      // while loop avoids flatMap function-call overhead and intermediate List.empty allocations
+      val buf = new mutable.ListBuffer[(PassengerGroup, Airport, Int)]()
+      var j = 0
+      while (j < N) {
+        val toAirport = airportsIdx(j)
         val distance = Computation.calculateDistance(fromAirport, toAirport)
         if (canHaveDemand(fromAirport, toAirport, distance)) {
           val relationship = countryRelationships.getOrElse((fromAirport.countryCode, toAirport.countryCode), 0)
           val affinity = Computation.calculateAffinityValue(fromAirport.zone, toAirport.zone, relationship)
-          
           val demand = computeBaseDemandBetweenAirports(fromAirport, toAirport, affinity, distance)
-
-          // Combine all chunks for this airport pair
           val travelerDemandValue = demand.travelerDemand + hubAirportsDemands.getOrElse(toAirport.iata, LinkClassValues.empty)
           val travelerType = if (fromAirport.population > PassengerType.TRAVELER_SMALL_TOWN_CEILING) PassengerType.TRAVELER else PassengerType.TRAVELER_SMALL_TOWN
-          val travelerChunks = generateChunksForPassengerType(travelerDemandValue, fromAirport, toAirport, travelerType, flightPreferencesPool, airportStats, cycle, cyclePhaseLength)
-          val businessChunks = generateChunksForPassengerType(demand.businessDemand, fromAirport, toAirport, PassengerType.BUSINESS, flightPreferencesPool, airportStats, cycle, cyclePhaseLength)
-          val touristChunks = generateChunksForPassengerType(demand.touristDemand, fromAirport, toAirport, PassengerType.TOURIST, flightPreferencesPool, airportStats, cycle, cyclePhaseLength)
-
-          travelerChunks ++ businessChunks ++ touristChunks
-        } else {
-          List.empty
+          buf ++= generateChunksForPassengerType(travelerDemandValue, fromAirport, toAirport, travelerType, flightPreferencesPool, airportStats, cycle, cyclePhaseLength)
+          buf ++= generateChunksForPassengerType(demand.businessDemand, fromAirport, toAirport, PassengerType.BUSINESS, flightPreferencesPool, airportStats, cycle, cyclePhaseLength)
+          buf ++= generateChunksForPassengerType(demand.touristDemand, fromAirport, toAirport, PassengerType.TOURIST, flightPreferencesPool, airportStats, cycle, cyclePhaseLength)
         }
+        j += 1
       }
 
       val eliteDemand = generateEliteDemand(fromAirport, destinationList).getOrElse(List.empty)
-      val eliteDemandChunks = eliteDemand.flatMap {
+      eliteDemand.foreach {
         case (toAirport, (passengerType, demand)) =>
-          generateChunksForPassengerType(demand, fromAirport, toAirport, passengerType, flightPreferencesPool, Map.empty, cycle, cyclePhaseLength) //pass empty map to bypass travelRate and randomizer
+          buf ++= generateChunksForPassengerType(demand, fromAirport, toAirport, passengerType, flightPreferencesPool, Map.empty, cycle, cyclePhaseLength)
       }
 
-      // Return all chunks originating from `fromAirport`
-      regularDemandChunks ++ eliteDemandChunks
-    }.toList // .toList converts the parallel collection back to a standard List
+      buf.toList
+    }.toList
+
+    val parallelMs = System.currentTimeMillis() - t0
+    PhaseTimings.record("computeDemand.parallelLoop", parallelMs)
+    PhaseTimings.record("computeDemand.hubAirports", hubNs.get() / 1_000_000L)
+    println(s"[DemandGen] parallelLoop=${parallelMs}ms hub=${hubNs.get()/1_000_000}ms")
 
     println(s"Generated ${computedDemandChunks.length} demand chunks from regular/elite demand")
 

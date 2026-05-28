@@ -605,15 +605,26 @@ object CountrySource {
          ids.toSet
        }
 
+       val validCountryCodes : Set[String] = {
+         val stmt = connection.prepareStatement("SELECT code FROM " + COUNTRY_TABLE)
+         val rs = stmt.executeQuery()
+         val codes = scala.collection.mutable.Set[String]()
+         while (rs.next()) codes += rs.getString("code")
+         rs.close(); stmt.close()
+         codes.toSet
+       }
+
        val replaceStatement = connection.prepareStatement("REPLACE INTO " + COUNTRY_MARKET_SHARE_TABLE + "(country, airline, passenger_count) VALUES (?,?,?)")
        marketShares.foreach { marketShare =>
-         replaceStatement.setString(1, marketShare.countryCode)
-         marketShare.airlineShares.foreach {
-           case (airline, passenger_count) if validAirlineIds.contains(airline) =>
-             replaceStatement.setInt(2, airline)
-             replaceStatement.setDouble(3, passenger_count)
-             replaceStatement.addBatch()
-           case _ => // skip stale airline IDs
+         if (validCountryCodes.contains(marketShare.countryCode)) {
+           replaceStatement.setString(1, marketShare.countryCode)
+           marketShare.airlineShares.foreach {
+             case (airline, passenger_count) if validAirlineIds.contains(airline) =>
+               replaceStatement.setInt(2, airline)
+               replaceStatement.setDouble(3, passenger_count)
+               replaceStatement.addBatch()
+             case _ => // skip stale airline IDs
+           }
          }
        }
 

@@ -27,4 +27,14 @@ object SimulationConfig {
   val persistOlympicsStats: Boolean = readBoolean("sim.persistOlympicsStats", "SIM_PERSIST_OLYMPICS_STATS", default = !fastMode)
 
   val bookingOverbookingCheck: Boolean = readBoolean("sim.bookingOverbookingCheck", "SIM_BOOKING_OVERBOOKING_CHECK", default = !fastMode)
+
+  // JFR: set SIM_CAPTURE_JFR=true to dump a cycle-N.jfr to recordings/ via Java Flight Recorder
+  val captureJfr: Boolean = readBoolean("sim.captureJfr", "SIM_CAPTURE_JFR", default = false)
+
+  // Watchdog: dump all thread stacks if any simulation phase exceeds this many seconds
+  val watchdogEnabled: Boolean = readBoolean("sim.watchdogEnabled", "SIM_WATCHDOG_ENABLED", default = true)
+  val watchdogThresholdSeconds: Int = sys.props.get("sim.watchdogThresholdSeconds")
+    .orElse(sys.env.get("SIM_WATCHDOG_THRESHOLD_SECONDS"))
+    .flatMap(_.toIntOption)
+    .getOrElse(120)
 }

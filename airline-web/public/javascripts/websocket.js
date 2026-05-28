@@ -1,3 +1,21 @@
+var simCurrentPhaseLabel = null // set when a CyclePhaseUpdate arrives, cleared on cycleCompleted
+
+function formatSimPhaseName(phaseName, phaseIndex, totalPhases) {
+    var names = {
+        'userSimulation':        'Usuários',
+        'eventSimulation':       'Eventos',
+        'botPricingSimulation':  'Bots',
+        'linkSimulation':        'Voos',
+        'airportSimulation':     'Aeroportos',
+        'allianceSimulation':    'Alianças',
+        'airplaneSimulation':    'Aeronaves',
+        'airlineSimulation':     'Airlines',
+        'airplaneModelSimulation': 'Modelos'
+    }
+    var display = names[phaseName] || phaseName
+    return display + ' (' + (phaseIndex + 1) + '/' + totalPhases + ')'
+}
+
 var wsUri = (function() {
     var protocol = window.location.protocol == "https:" ? "wss:" : "ws:"
     var port = window.location.port || (window.location.protocol == "https:" ? 443 : 80)
@@ -93,7 +111,16 @@ function connectWebSocket(airlineId) {
         console.log("websocket message : " + evt.data)
         if (json.messageType == "cycleInfo") {
             updateTime(json.cycle, json.fraction, json.cycleDurationEstimation)
+        } else if (json.messageType == "cyclePhaseUpdate") {
+            simCurrentPhaseLabel = formatSimPhaseName(json.phaseName, json.phaseIndex, json.totalPhases)
+            $('.nextTickEstimation').text(simCurrentPhaseLabel)
+            var phaseFraction = json.totalPhases > 0 ? json.phaseIndex / json.totalPhases : 0
+            $('#simProgressBar').css('width', (phaseFraction * 100) + '%')
+            $('#simProgressContainer').show()
         } else if (json.messageType == "cycleCompleted") {
+            simCurrentPhaseLabel = null
+            $('#simProgressContainer').hide()
+            $('#simProgressBar').css('width', '0%')
             refreshSimulationState()
             if (selectedAirlineId) {
                 if (document.hidden) {

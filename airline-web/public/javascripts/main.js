@@ -225,7 +225,15 @@ function updateTime(cycle, fraction, cycleDurationEstimation) {
 
         $(".currentTime").text(padBefore(cycle % 48 + "." + Math.floor(cycle / 48), 2))
 
-        if (simState !== null) {
+        if (simCurrentPhaseLabel) {
+            var pct = cycleDurationMs > 0 ? Math.round(Math.max(0, Math.min(99, (1 - durationTillNextTick / cycleDurationMs) * 100))) : 0
+            $('.nextTickEstimation').text(simCurrentPhaseLabel + ' ' + pct + '%')
+            if (cycleDurationMs > 0) {
+                var barPct = Math.max(0, Math.min(99, (1 - durationTillNextTick / cycleDurationMs) * 100))
+                $('#simProgressBar').css('width', barPct + '%')
+            }
+            $('#simProgressContainer').show()
+        } else if (simState !== null) {
             if (simState.inProgress) {
                 $('.nextTickEstimation').text('Processando...')
             } else if (simState.autoAdvance) {
@@ -233,6 +241,7 @@ function updateTime(cycle, fraction, cycleDurationEstimation) {
             } else {
                 $('.nextTickEstimation').text('Pausado')
             }
+            $('#simProgressContainer').hide()
         } else if (hasTickEstimation) {
           var minutesLeft = Math.round(durationTillNextTick / 1000 / 60)
           if (minutesLeft <= 0) {
@@ -242,6 +251,7 @@ function updateTime(cycle, fraction, cycleDurationEstimation) {
           } else {
               $(".nextTickEstimation").text(minutesLeft + " minutes")
           }
+          $('#simProgressContainer').hide()
         }
     }
     tickTimerCreator = function() {

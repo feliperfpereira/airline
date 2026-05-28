@@ -12,6 +12,11 @@ object AirportCache {
   val detailedCache: LoadingCache[Int, Option[Airport]] = Caffeine.newBuilder().maximumSize(2500).expireAfterAccess(30, TimeUnit.MINUTES).build[Int, Option[Airport]](new DetailedLoader())
   val simpleCache: LoadingCache[Int, Option[Airport]] = Caffeine.newBuilder().maximumSize(5000).expireAfterAccess(30, TimeUnit.MINUTES).build[Int, Option[Airport]](new SimpleLoader())
 
+  // Cached airport ID list — avoids a DB query on every getAllAirports() call
+  @volatile private var cachedAirportIds: List[Int] = List.empty
+  // Cached simple airport list — avoids repeated Caffeine batch-gets
+  @volatile private var cachedAllSimpleAirports: List[Airport] = List.empty
+
   def getAirport(airportId: Int, fullLoad: Boolean = false): Option[Airport] = {
     if (fullLoad) {
       detailedCache.get(airportId)
@@ -26,8 +31,15 @@ object AirportCache {
   }
 
   def getAllAirports(fullLoad: Boolean = false): List[Airport] = {
-    val allAirportIds = AirportSource.loadAllAirportIds()
-    getAirports(allAirportIds, fullLoad).values.toList
+    if (!fullLoad && cachedAllSimpleAirports.nonEmpty) {
+      return cachedAllSimpleAirports
+    }
+    if (cachedAirportIds.isEmpty) {
+      cachedAirportIds = AirportSource.loadAllAirportIds()
+    }
+    val result = getAirports(cachedAirportIds, fullLoad).values.toList
+    if (!fullLoad) cachedAllSimpleAirports = result
+    result
   }
 
   def refreshAirport(airportId: Int, fullLoad: Boolean = false) = {
@@ -41,6 +53,8 @@ object AirportCache {
   }
 
   def invalidateAll() = {
+    cachedAirportIds = List.empty
+    cachedAllSimpleAirports = List.empty
     detailedCache.invalidateAll()
     simpleCache.invalidateAll()
   }

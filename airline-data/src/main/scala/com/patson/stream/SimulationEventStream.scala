@@ -97,6 +97,9 @@ object SimulationEventStream{
               registeredActor ! (message, None) //send to actors on the airline-web side
             }
 
+          case phaseUpdate : CyclePhaseUpdate =>
+            registeredActor.foreach(_ ! (phaseUpdate, None))
+
           case _ => //nothing
         }
         
@@ -115,6 +118,7 @@ class SimulationEvent
 case class CycleCompleted(cycle : Int, cycleEndTime : Long) extends SimulationEvent //main simulation send this, this will be relayed directly to client
 case class CycleStart(cycle: Int, cycleStartTime : Long) extends SimulationEvent //main simulation send this, this will NOT be relay back to client
 case class CycleInfo(cycle: Int, fraction : Double, cycleDurationEstimation : Long) extends SimulationEvent  //bridge actor convert a CycleStart into CycleInfo and send back to client
+case class CyclePhaseUpdate(cycle: Int, phaseIndex: Int, totalPhases: Int, phaseName: String) extends SimulationEvent //published before each simulation phase starts
 case class ReconnectPing()
 case class KeepAlivePing()
 case class KeepAlivePong()

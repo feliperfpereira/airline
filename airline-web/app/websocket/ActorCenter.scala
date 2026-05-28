@@ -2,7 +2,7 @@ package websocket
 
 import org.apache.pekko.actor.{Actor, ActorRef, ActorSelection, ActorSystem, Cancellable, Props}
 import com.patson.model.{Airline, NotificationCategory}
-import com.patson.stream.{CycleCompleted, CycleInfo, KeepAlivePing, KeepAlivePong, SimulationEvent}
+import com.patson.stream.{CycleCompleted, CycleInfo, CyclePhaseUpdate, KeepAlivePing, KeepAlivePong, SimulationEvent}
 import com.patson.util.{AirlineCache, AirplaneOwnershipCache, AirportCache, AirportStatisticsCache}
 import com.typesafe.config.ConfigFactory
 import controllers.{AirlineTutorial, AirportUtil, Application, GooglePhotoUtil, ResponseCache}
@@ -37,6 +37,9 @@ sealed class LocalActor(out: ActorRef, airlineId: Int) extends Actor {
       case CycleInfo(cycle, fraction, cycleDurationEstimation) =>
         println(s"${self.path} Received cycle info on cycle: $cycle")
         out ! Json.obj("messageType" -> "cycleInfo", "cycle" -> cycle, "fraction" -> fraction, "cycleDurationEstimation" -> cycleDurationEstimation)
+
+      case CyclePhaseUpdate(cycle, phaseIndex, totalPhases, phaseName) =>
+        out ! Json.obj("messageType" -> "cyclePhaseUpdate", "cycle" -> cycle, "phaseIndex" -> phaseIndex, "totalPhases" -> totalPhases, "phaseName" -> phaseName)
     }
 
     case BroadcastMessage(text) =>

@@ -1,8 +1,9 @@
 package com.patson
 
 import java.util.{ArrayList, Collections}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import java.util.concurrent.ConcurrentHashMap
+import com.patson.util.PhaseTimings
 import com.patson.data.{AirlineSource, AirportSource, AllianceSource, CountrySource, CycleSource, LinkSource, WorldStatisticsSource}
 import com.patson.model.{TransferSpecialization, _}
 import FlightPreferenceType._
@@ -160,7 +161,9 @@ object PassengerSimulation {
         else 5
       val isSingleTicket = if (consumptionCycleCount == 0 || consumptionCycleCount == 5) true else false
       val allRoutesMap = new ConcurrentHashMap[PassengerGroup, Map[Airport, Route]]()
+      val t0EdgeBuild = System.currentTimeMillis()
       val (classEdges, loopVertexIndex, loopNVertices) = buildEdgesPerClass(availableLinks)
+      val edgeBuildMs = System.currentTimeMillis() - t0EdgeBuild
 
       //start consuming routes
       //       println()
@@ -171,10 +174,14 @@ object PassengerSimulation {
       val counter = new AtomicInteger(0)
       val progressCount = new AtomicInteger(0)
       val progressChunk = requiredRoutes.size / 100
+      val routeFindNs = new AtomicLong(0L)
+      val lockNs = new AtomicLong(0L)
+      val t0Book = System.currentTimeMillis()
 
       filteredDemandChunks.par.foreach {
         case (passengerGroup, toAirport, chunkSize) =>
           var hasComputedRouteMap = false
+          val rfStart = System.nanoTime()
           val toAirportRouteMap = allRoutesMap.computeIfAbsent(passengerGroup, _ => {
             hasComputedRouteMap = true
             findShortestRouteFast(
@@ -189,6 +196,7 @@ object PassengerSimulation {
               isSingleTicket
             )
           })
+          if (hasComputedRouteMap) routeFindNs.addAndGet(System.nanoTime() - rfStart)
 
           toAirportRouteMap.get(toAirport) match {
             case Some(pickedRoute) =>
@@ -200,6 +208,7 @@ object PassengerSimulation {
                   // Lock all links in the route in a fixed global order (by id) to prevent
                   // deadlock while allowing routes with disjoint link sets to book in parallel.
                   val sortedLinks = pickedRoute.links.map(_.link).distinct.sortBy(_.id)
+                  val lockStart = System.nanoTime()
                   val consumptionSize = withLinksLocked(sortedLinks) {
                     val size = pickedRoute.links.foldLeft(chunkSize) { (foldInt, linkConsideration) =>
                       val actualLinkClass = linkConsideration.linkClass
@@ -214,6 +223,7 @@ object PassengerSimulation {
                     }
                     size
                   }
+                  lockNs.addAndGet(System.nanoTime() - lockStart)
                   //some capacity available on all the links, consume them NOMNOM NOM!
                   if (consumptionSize > 0) {
                     consumptionResult.add((passengerGroup, toAirport, consumptionSize, pickedRoute))
@@ -249,6 +259,12 @@ object PassengerSimulation {
             }
           }
       }
+      val parallelBookMs = System.currentTimeMillis() - t0Book
+      val loopPrefix = s"paxConsume.loop${consumptionCycleCount}"
+      PhaseTimings.record(s"$loopPrefix.edgeBuilding", edgeBuildMs)
+      PhaseTimings.record(s"$loopPrefix.parallelBook", parallelBookMs)
+      PhaseTimings.record(s"$loopPrefix.routeFinding", routeFindNs.get() / 1_000_000L)
+      PhaseTimings.record(s"$loopPrefix.lockedSection", lockNs.get() / 1_000_000L)
       println(s"Done! (${System.currentTimeMillis() - loopStart} ms)")
 
       //now process the remainingDemandChunks in next cycle
